@@ -1,0 +1,26 @@
+# secrets — never commit
+.bazaar_key
+.inferera_key
+.logfare_key
+*.key
+
+# local runtime state
+arena.db
+arena-data/
+generated/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# env / editor
+.env
+.env.local
+.vercel
+.vscode/
+.idea/
+.DS_Store
