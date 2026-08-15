@@ -3,6 +3,7 @@
 .inferera_key
 .logfare_key
 .opencode_key
+.freerouter_key
 .admin_password
 *.key
 
@@ -14,6 +15,7 @@ generated/
 server.log
 server.err.log
 skills-user/
+.freebuff/
 
 # python
 __pycache__/

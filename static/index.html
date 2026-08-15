@@ -626,6 +626,38 @@
   .progress-fill{box-shadow:0 0 12px rgba(255,138,42,.8)}
   video{box-shadow:0 0 0 1px rgba(255,154,60,.2),0 12px 40px rgba(0,0,0,.4),0 0 30px rgba(255,138,42,.14)}
   .samples button:hover{box-shadow:var(--glow-acc)}
+
+  /* vm workstations */
+  .vm-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0}
+  .vm-btn{background:var(--acc-grad);border:none;color:#140f0a;font-weight:600;padding:8px 14px;
+    border-radius:8px;cursor:pointer;font-size:12.5px}
+  .vm-btn.ghost{background:transparent;border:1px solid rgba(255,154,60,.3);color:var(--acc2)}
+  .vm-btn.small{padding:4px 10px;font-size:11.5px}
+  .vm-note{font-size:11.5px;color:var(--muted2);font-family:var(--mono)}
+  .vm-cols{display:grid;grid-template-columns:340px 1fr;gap:14px;align-items:start}
+  .vm-list{display:flex;flex-direction:column;gap:8px;max-height:70vh;overflow:auto}
+  .vm-card{border:1px solid rgba(255,154,60,.16);border-radius:10px;padding:10px 12px;
+    background:linear-gradient(180deg,rgba(28,24,21,.9),rgba(18,15,13,.95));cursor:pointer}
+  .vm-card:hover,.vm-card.sel{border-color:var(--acc);box-shadow:var(--glow-acc)}
+  .vm-card.on{border-left:3px solid var(--green)}
+  .vm-card-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .vm-card-top b{font-size:13px;color:var(--cream)}
+  .vm-card-meta{font-size:11px;color:var(--muted2);font-family:var(--mono);margin:4px 0 8px}
+  .vm-badge{font-size:10px;padding:2px 8px;border-radius:99px;border:1px solid var(--border2);
+    color:var(--muted2);text-transform:uppercase;letter-spacing:.06em}
+  .vm-badge.st-running{color:var(--green);border-color:rgba(162,211,124,.5)}
+  .vm-badge.st-stopped{color:var(--muted2)}
+  .vm-card-acts{display:flex;gap:4px}
+  .vm-card-acts button{background:rgba(255,154,60,.08);border:1px solid rgba(255,154,60,.25);
+    color:var(--acc2);border-radius:6px;width:26px;height:24px;font-size:11px;cursor:pointer}
+  .vm-card-acts button:hover{background:var(--acc-dim);box-shadow:var(--glow-acc)}
+  .vm-card-acts button.danger{color:var(--red);border-color:rgba(248,113,113,.35)}
+  .vm-screen-col{min-width:0}
+  .vm-screen-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .vm-screen-head span{font-size:12px;color:var(--muted2);font-family:var(--mono)}
+  .vm-screen{border:1px solid rgba(255,154,60,.16);border-radius:12px;min-height:280px;
+    background:#0d0b0a;display:flex;align-items:center;justify-content:center;overflow:auto}
+  .vm-empty{font-size:12px;color:var(--muted2);font-family:var(--mono);padding:20px;text-align:center}
 </style>
 </head>
 <body>
@@ -635,6 +667,7 @@
     <div class="side-nav">
       <button id="navNew"><span class="ico">✎</span> New Chat</button>
       <button id="navFoundry"><span class="ico">⬢</span> Foundry <span style="font-size:9px;color:var(--acc2);margin-left:4px">AGENT</span></button>
+      <button data-page="vm"><span class="ico">🖥️</span> Workstations</button>
       <button data-page="battle"><span class="ico">⚔</span> Battle</button>
       <button data-page="image"><span class="ico">▦</span> Image</button>
       <button data-page="video"><span class="ico">▶</span> Video</button>
@@ -679,6 +712,35 @@
       </div>
       <div class="msel-pop" id="modelPop"></div>
       <div class="cmdpop" id="cmdPop"></div>
+    </section>
+
+    <!-- WORKSTATIONS -->
+    <section class="page wide" id="page-vm">
+      <div class="ph">VM Workstations</div>
+      <div class="psub">Real remote XFCE desktops (NoVM). The Foundry agent can drive these
+        itself — create, boot, connect, screenshot, type, click and run commands. The panel
+        below is the manual control deck: the same sessions the agent sees.</div>
+      <div class="vm-toolbar">
+        <input id="vmName" placeholder="workstation-name" style="padding:6px 10px;background:#1c1917;border:1px solid #3f3a37;color:var(--fg);border-radius:8px;font-family:var(--mono)">
+        <select id="vmRes" style="padding:6px 10px;background:#1c1917;border:1px solid #3f3a37;color:var(--fg);border-radius:8px">
+          <option value="1280x720">1280x720</option>
+          <option value="1920x1080">1920x1080</option>
+          <option value="800x600">800x600</option>
+        </select>
+        <button class="vm-btn" id="vmCreateBtn">＋ Create (max 2)</button>
+        <button class="vm-btn ghost" id="vmRefreshBtn">⟳ Refresh</button>
+        <span class="vm-note" id="vmNote"></span>
+      </div>
+      <div class="vm-cols">
+        <div class="vm-list" id="vmList"><div class="vm-empty">no sessions — create one above</div></div>
+        <div class="vm-screen-col">
+          <div class="vm-screen-head">
+            <span id="vmScreenTitle">screen</span>
+            <a class="vm-btn ghost small" id="vmOpenLink" target="_blank" style="display:none">open viewer ↗</a>
+          </div>
+          <div class="vm-screen" id="vmScreen"><span class="vm-empty">select a session to see its screen</span></div>
+        </div>
+      </div>
     </section>
 
     <!-- BATTLE -->
@@ -867,6 +929,7 @@ function showPage(p){
   const nb=document.querySelector('.side-nav button[data-page="'+p+'"]');if(nb)nb.classList.add('active');
   if(p==='leaderboard')loadLb();
   if(p==='skills')loadSkills();
+  if(p==='vm')vmRefresh();
 }
 document.querySelectorAll('.side-nav button[data-page]').forEach(b=>b.onclick=()=>showPage(b.dataset.page));
 $('#navNew').onclick=()=>{curConv='';setFoundryUI(false);
@@ -1069,7 +1132,12 @@ const TOOL_ICONS={calculate:'🧮',search_web:'🔎',fetch_url:'🌐',run_python
   run_command:'💻',install_dependency:'📦',create_file:'📄',read_file:'📖',
   edit_file:'✏️',append_file:'➕',delete_file:'🗑️',list_files:'📁',generate_image:'🎨',
   current_time:'🕐',list_skills:'📚',use_skill:'🧠',create_skill:'✍️',
-  run_subagent:'🦾',ask_user:'❓'};
+  run_subagent:'🦾',ask_user:'❓',
+  vm_list:'🖥️',vm_create:'➕🖥️',vm_start:'▶️🖥️',vm_stop:'⏹️🖥️',
+  vm_pause:'⏸️🖥️',vm_resume:'⏯️🖥️',vm_restart:'🔁🖥️',vm_recover:'🛠️🖥️',
+  vm_delete:'❌🖥️',vm_connect:'🔗🖥️',vm_disconnect:'🔌🖥️',vm_status:'📊🖥️',
+  vm_install_app:'📦🖥️',vm_files:'📁🖥️',vm_upload:'⬆️🖥️',vm_download:'⬇️🖥️',
+  vm_screenshot:'📷🖥️',vm_see:'👁️🖥️',vm_key:'⌨️🖥️',vm_click:'🖱️🖥️',vm_exec:'⚡🖥️'};
 const FILE_ICON=name=>{const e=name.split('.').pop().toLowerCase();
   return {html:'🌐',css:'🎨',js:'⚡',json:'🧾',py:'🐍',md:'📝',txt:'📄',svg:'🖼'}[e]||'📄';};
 function fmtSize(n){
@@ -1681,6 +1749,93 @@ function cmdKey(e,inp){
   el.addEventListener('keydown',e=>cmdKey(e,el));
 });
 document.addEventListener('click',e=>{if(!e.target.closest('#cmdPop')&&!e.target.closest('.composer'))hideCmdPop();});
+
+// ------- VM workstation panel
+let VMSESS=[],vmSel=null;
+async function vmApi(method,path,body){
+  try{
+    const r=await fetch('/api/vm'+path,{method,
+      headers:body?{'Content-Type':'application/json'}:undefined,
+      body:body?JSON.stringify(body):undefined});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
+    return j;
+  }catch(e){toast('VM: '+e.message);throw e;}
+}
+async function vmRefresh(){
+  try{
+    const j=await vmApi('GET','/sessions');
+    VMSESS=j.sessions||[];
+    $('#vmNote').textContent=VMSESS.length+'/'+(j.max||2)+' sessions';
+    const list=$('#vmList');
+    if(!VMSESS.length){list.innerHTML='<div class="vm-empty">no sessions — create one above</div>';vmSel=null;return;}
+    list.innerHTML=VMSESS.map(s=>{
+      const on=s.status==='running',sel=s.id===vmSel;
+      return `<div class="vm-card${sel?' sel':''}${on?' on':''}" data-id="${s.id}">
+        <div class="vm-card-top">
+          <b>${s.name||s.id.slice(0,8)}</b>
+          <span class="vm-badge st-${s.status}">${s.status}</span>
+        </div>
+        <div class="vm-card-meta">${s.resolution||'?'} · ${(s.id||'').slice(0,8)}</div>
+        <div class="vm-card-acts">
+          <button data-act="start">▶</button>
+          <button data-act="stop">⏹</button>
+          <button data-act="pause">⏸</button>
+          <button data-act="resume">⏵</button>
+          <button data-act="restart">↻</button>
+          <button data-act="recover">✚</button>
+          <button data-act="connect" title="viewer link">🔗</button>
+          <button data-act="shot" title="screenshot">📷</button>
+          <button data-act="delete" class="danger">✕</button>
+        </div>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.vm-card').forEach(c=>{
+      c.onclick=e=>{if(e.target.closest('button'))return;vmSel=c.dataset.id;vmRefresh();};
+      c.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
+        const act=b.dataset.act,id=c.dataset.id;
+        if(act==='shot'){vmScreen(id);return;}
+        if(act==='connect'){
+          try{const j=await vmApi('POST','/sessions/'+id+'/connect');vmOpen(j.url||'');}catch(e){}
+          return;
+        }
+        if(act==='delete'){
+          if(!confirm('Delete this workstation?'))return;
+          try{await vmApi('DELETE','/sessions/'+id);if(vmSel===id)vmSel=null;vmRefresh();}catch(e){}
+          return;
+        }
+        try{await vmApi('POST','/sessions/'+id+'/'+act);vmRefresh();}catch(e){}
+      });
+    });
+  }catch(e){/* toast already shown */}
+}
+function vmOpen(url){
+  if(!url){toast('VM: no viewer link returned');return;}
+  const a=$('#vmOpenLink');a.href=url;a.style.display='inline-block';
+  toast('Viewer link ready — open it in a new tab');
+}
+async function vmScreen(id){
+  const title=$('#vmScreenTitle');title.textContent='grabbing…';
+  $('#vmScreen').innerHTML='<div class="vm-empty">capturing the desktop (10–20s)…</div>';
+  try{
+    const r=await fetch('/api/vm/screenshot/'+id);
+    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||('HTTP '+r.status));}
+    const url=URL.createObjectURL(await r.blob());
+    $('#vmScreen').innerHTML='';
+    const img=document.createElement('img');img.src=url;img.style.maxWidth='100%';img.style.borderRadius='8px';
+    $('#vmScreen').appendChild(img);
+    title.textContent='screen · '+id.slice(0,8)+' (live grab)';
+  }catch(e){
+    title.textContent='screen';
+    $('#vmScreen').innerHTML='<div class="vm-empty">'+e.message+'</div>';
+    if(e.message.includes('WebSocket')||e.message.includes('failed'))toast('VM screenshot needs outbound WebSockets — unavailable on Vercel. Use the viewer link instead.');
+  }
+}
+$('#vmCreateBtn').onclick=async()=>{
+  const name=$('#vmName').value.trim(),res=$('#vmRes').value;
+  try{await vmApi('POST','/sessions',{name:name||undefined,resolution:res});vmRefresh();$('#vmName').value='';}catch(e){}
+};
+$('#vmRefreshBtn').onclick=vmRefresh;
 </script>
 </body>
 </html>

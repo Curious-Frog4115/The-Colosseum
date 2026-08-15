@@ -16,14 +16,22 @@ import json
 import os
 import random
 import re
+import socket
+import ssl
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
+import zlib
+from base64 import b64encode
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -63,6 +71,7 @@ KILO = "kilo"
 LOGFARE = "logfare"
 INFERERA = "inferera"
 OPENCODE = "opencode"
+FREEROUTER = "freerouter"
 
 PROVIDER_URLS = {
     LOGFARE: "https://logfare.ai/v1/chat/completions",
@@ -73,6 +82,7 @@ PROVIDER_URLS = {
     POLLIN: "https://text.pollinations.ai/openai",
     KILO: "https://api.kilo.ai/api/gateway/chat/completions",
     OPENCODE: "https://opencode.ai/zen/v1/chat/completions",
+    FREEROUTER: "https://freerouter.eu.cc/v1/chat/completions",
 }
 POLLIN_IMG = "https://image.pollinations.ai/prompt/"
 OVH_IMG = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/images/generations"
@@ -98,6 +108,12 @@ OPENCODE_KEY_FILE = os.path.join(ROOT, ".opencode_key")
 OPENCODE_KEY = os.environ.get("OPENCODE_KEY", "")
 if not OPENCODE_KEY and os.path.exists(OPENCODE_KEY_FILE):
     OPENCODE_KEY = open(OPENCODE_KEY_FILE).read().strip()
+
+# user-supplied freerouter.eu.cc key — OpenAI-compatible router gateway
+FREEROUTER_KEY_FILE = os.path.join(ROOT, ".freerouter_key")
+FREEROUTER_KEY = os.environ.get("FREEROUTER_KEY", "")
+if not FREEROUTER_KEY and os.path.exists(FREEROUTER_KEY_FILE):
+    FREEROUTER_KEY = open(FREEROUTER_KEY_FILE).read().strip()
 
 
 async def ensure_bazaar_key():
@@ -135,6 +151,8 @@ def provider_headers(provider):
         h["Authorization"] = f"Bearer {INFERERA_KEY}"
     elif provider == OPENCODE:
         h["Authorization"] = f"Bearer {OPENCODE_KEY}"
+    elif provider == FREEROUTER:
+        h["Authorization"] = f"Bearer {FREEROUTER_KEY}"
     return h
 
 
@@ -188,7 +206,8 @@ CATALOG = [
     ("deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek", "frontier", "128K",
      [(BAZAAR, "deepseek/deepseek-v4-flash:free", 1),
       (LOGFARE, "deepseek-v4-flash", 2),
-      (OPENCODE, "deepseek-v4-flash-free", 3)]),
+      (OPENCODE, "deepseek-v4-flash-free", 3),
+      (FREEROUTER, "deepseek-v4-flash", 4)]),
     ("qwen37-flash", "Qwen 3.7 Flash", "Alibaba", "frontier", "128K",
      [(BAZAAR, "qwen/qwen3.7-flash:free", 1)]),
     ("gemini-31-flash-lite", "Gemini 3.1 Flash Lite", "Google", "fast", "1M",
@@ -251,9 +270,18 @@ CATALOG = [
     ("kimi-k27-code", "Kimi K2.7 Code", "Moonshot AI", "coding", "256K",
      [(LOGFARE, "kimi-k2.7-code", 1)]),
     ("deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek", "frontier", "128K",
-     [(LOGFARE, "deepseek-v4-pro", 1)]),
+     [(LOGFARE, "deepseek-v4-pro", 1),
+      (FREEROUTER, "deepseek-v4-pro", 2)]),
     ("qwen38-max", "Qwen 3.8 Max", "Alibaba", "frontier", "256K",
-     [(LOGFARE, "qwen-3.8-max", 1)]),
+     [(LOGFARE, "qwen-3.8-max", 1),
+      (FREEROUTER, "qwen3.8-max", 2)]),
+    # --- freerouter.eu.cc keyless catalog: probed live this session ---
+    ("fr-qwen38-27b", "Qwen 3.8 27B (FreeRouter)", "Alibaba", "general", "131K",
+     [(FREEROUTER, "qwen-3.8-27b", 1)]),
+    ("flashy-v2", "Flashy V2 Preview", "Router", "fast", "128K",
+     [(FREEROUTER, "flashy-v2", 1)]),
+    ("flashy-v1", "Flashy V1", "Router", "fast", "128K",
+     [(FREEROUTER, "flashy-v1", 1)]),
     ("qwen36-35b", "Qwen 3.6 35B A3B", "Alibaba", "general", "131K",
      [(LOGFARE, "qwen-3.6-35b-a3b", 1)]),
     # inferera.com (AIHubMix mirror) — user key, FREE-tier models only.
@@ -275,7 +303,8 @@ CATALOG = [
      [(KILO, "kilo-auto/small", 1)]),
     ("nemotron-3-ultra", "Nemotron 3 Ultra 550B", "NVIDIA", "frontier", "131K",
      [(KILO, "nvidia/nemotron-3-ultra-550b-a55b:free", 1),
-      (OPENCODE, "nemotron-3-ultra-free", 2)]),
+      (OPENCODE, "nemotron-3-ultra-free", 2),
+      (FREEROUTER, "nemotron-3-ultra-550b-a55b", 3)]),
     ("nemotron-3-nano-omni", "Nemotron 3 Nano Omni 30B", "NVIDIA", "reasoning", "131K",
      [(KILO, "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", 1)]),
     ("laguna-xs", "Laguna XS 2.1", "Poolside", "coding", "131K",
@@ -629,6 +658,8 @@ async def stream_canonical(model_id, messages, temp=0.7, max_tokens=900, tools=N
                 if provider == BAZAAR and not BAZAAR_KEY:
                     continue
                 if provider == OPENCODE and not OPENCODE_KEY:
+                    continue
+                if provider == FREEROUTER and not FREEROUTER_KEY:
                     continue
                 payload = {"model": upstream, "stream": True,
                            "temperature": temp, "max_tokens": max_tokens,
@@ -1237,6 +1268,638 @@ async def tool_generate_image(args):
         return {"error": str(e)}
 
 
+# ============================================================ NoVM workstation
+# The Foundry agent can drive a REAL remote XFCE desktop (NoVM) through its HTTP
+# API plus a minimal VNC-over-WebSocket client. All HTTP endpoints are Vercel-safe;
+# the VNC harness needs outbound WebSockets (works on self-host, degrades on Vercel).
+NOVM_BASES = [
+    os.environ.get("NOVM_BASE", ""),
+    "https://no-vm-clone--unofficialarena.replit.app",
+    "https://virtual-xfce-spin--ogsincord.replit.app",
+]
+NOVM_BASES = [b.rstrip("/") for b in NOVM_BASES if b]
+_NOVM_OK_BASE = None
+_NOVM_OK_T = 0.0
+_NOVM_MAX_SESSIONS = 2  # backend can only host two workstations at a time
+_NOVM_APPFINDER = (64, 704)  # bottom-left launcher button on the XFCE desktop
+_NOVM_TERM_QUERY = "xfce4-terminal"
+
+
+async def _novm_base():
+    global _NOVM_OK_BASE, _NOVM_OK_T
+    now = time.time()
+    if _NOVM_OK_BASE and now - _NOVM_OK_T < 300:
+        return _NOVM_OK_BASE
+    for base in NOVM_BASES:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(base + "/api/sessions")
+            if r.status_code == 200 and isinstance(r.json(), list):
+                _NOVM_OK_BASE, _NOVM_OK_T = base, now
+                return base
+        except Exception:
+            continue
+    raise RuntimeError("no NoVM backend reachable (set NOVM_BASE or check hosts)")
+
+
+async def _novm(method, path, payload=None, timeout=90):
+    """One HTTP call to the NoVM API with rate-limit retry."""
+    base = await _novm_base()
+    last = None
+    for att in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as c:
+                if method == "GET":
+                    r = await c.get(base + path)
+                elif method == "DELETE":
+                    r = await c.delete(base + path)
+                else:
+                    r = await c.post(base + path, json=payload or {})
+            txt = r.text
+            if r.status_code == 429 or "rate exceeded" in txt.lower():
+                await asyncio.sleep(3 + att * 2)
+                continue
+            return r.status_code, txt
+        except Exception as e:
+            last = e
+            await asyncio.sleep(2 + att)
+    return 500, f"{{'error': 'NoVM request failed: {last}'}}"
+
+
+def _novm_json(status, txt):
+    try:
+        return json.loads(txt)
+    except Exception:
+        return {"raw": txt[:500]}
+
+
+async def _novm_session_list():
+    st, txt = await _novm("GET", "/api/sessions")
+    return st, _novm_json(st, txt)
+
+
+async def _novm_require_session(sid):
+    st, txt = await _novm("GET", f"/api/sessions/{sid}")
+    return st, _novm_json(st, txt)
+
+
+# ---- tools ----------------------------------------------------------------
+def _novm_summary(sess):
+    return {k: sess.get(k) for k in
+            ("id", "name", "status", "displayNumber", "wsPort", "resolution",
+             "disableTimeouts", "errorMessage", "createdAt", "startedAt")}
+
+
+async def tool_vm_list(args):
+    st, data = await _novm_session_list()
+    if st != 200:
+        return {"error": f"NoVM list failed ({st})", "raw": data}
+    return {"sessions": [_novm_summary(s) for s in data],
+            "count": len(data),
+            "max": _NOVM_MAX_SESSIONS,
+            "tip": "create/start/connect/delete via vm_create, vm_start, vm_connect, vm_delete"}
+
+
+async def tool_vm_create(args):
+    st, existing = await _novm_session_list()
+    running = [s for s in existing if s.get("status") in ("running", "starting", "paused")]
+    if len(running) >= _NOVM_MAX_SESSIONS:
+        return {"error": f"already {len(running)} sessions active (max {_NOVM_MAX_SESSIONS}). "
+                         "Stop or delete one first: vm_stop or vm_delete.",
+                "sessions": [_novm_summary(s) for s in existing]}
+    name = str(args.get("name") or f"workstation-{uuid.uuid4().hex[:6]}")
+    reso = str(args.get("resolution") or "1280x720")
+    if reso not in ("1280x720", "1920x1080", "800x600"):
+        return {"error": f"unsupported resolution '{reso}' (use 1280x720, 1920x1080 or 800x600)"}
+    st, txt = await _novm("POST", "/api/sessions",
+                          {"name": name, "resolution": reso, "disableTimeouts": True})
+    if st != 201:
+        return {"error": f"NoVM create failed ({st})", "raw": _novm_json(st, txt)}
+    data = _novm_json(st, txt)
+    return {"created": True, "session": _novm_summary(data),
+            "next": "call vm_start to boot the desktop, then vm_connect to open the viewer"}
+
+
+async def _vm_action(args, action, verb):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": f"vm_{verb} requires an 'id' argument"}
+    st, txt = await _novm("POST", f"/api/sessions/{sid}/{action}")
+    data = _novm_json(st, txt)
+    if st not in (200, 201, 202):
+        return {"error": f"NoVM {action} failed ({st})", "raw": data}
+    if isinstance(data, dict) and data.get("error"):
+        return {"error": data["error"]}
+    return {"ok": verb, "session": _novm_summary(data) if isinstance(data, dict) else data}
+
+
+async def tool_vm_start(args):
+    return await _vm_action(args, "start", "start")
+
+
+async def tool_vm_stop(args):
+    return await _vm_action(args, "stop", "stop")
+
+
+async def tool_vm_pause(args):
+    return await _vm_action(args, "pause", "pause")
+
+
+async def tool_vm_resume(args):
+    return await _vm_action(args, "resume", "resume")
+
+
+async def tool_vm_restart(args):
+    return await _vm_action(args, "restart", "restart")
+
+
+async def tool_vm_recover(args):
+    return await _vm_action(args, "recover", "recover")
+
+
+async def tool_vm_delete(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": "vm_delete requires an 'id' argument"}
+    st, txt = await _novm("DELETE", f"/api/sessions/{sid}")
+    if st in (200, 204):
+        return {"deleted": sid}
+    return {"error": f"NoVM delete failed ({st})", "raw": _novm_json(st, txt)}
+
+
+async def tool_vm_connect(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": "vm_connect requires an 'id' argument"}
+    st, txt = await _novm("POST", f"/api/sessions/{sid}/connect")
+    data = _novm_json(st, txt)
+    if st not in (200, 201) or isinstance(data, dict) and data.get("error"):
+        return {"error": f"NoVM connect failed ({st})", "raw": data}
+    url = data.get("url") or ""
+    return {"connected": True, "url": url,
+            "note": "viewer link is valid ~15 min while the session is running; "
+                    "re-run vm_connect to refresh it"}
+
+
+async def tool_vm_disconnect(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": "vm_disconnect requires an 'id' argument"}
+    st, txt = await _novm("POST", f"/api/sessions/{sid}/disconnect")
+    return {"ok": True} if st in (200, 201) else \
+        {"error": f"NoVM disconnect failed ({st})", "raw": _novm_json(st, txt)}
+
+
+async def tool_vm_status(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": "vm_status requires an 'id' argument"}
+    st, data = await _novm_require_session(sid)
+    if st != 200:
+        return {"error": f"NoVM status failed ({st})", "raw": data}
+    return {"session": _novm_summary(data),
+            "tip": "use vm_connect for the human's viewer link; vm_screenshot/vm_see to inspect the screen"}
+
+
+async def tool_vm_install_app(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    app = str(args.get("app") or "").strip()
+    if not sid or not app:
+        return {"error": "vm_install_app requires 'id' and 'app' (chromium, gedit, mousepad)"}
+    st, txt = await _novm("POST", f"/api/sessions/{sid}/apps", {"appId": app})
+    data = _novm_json(st, txt)
+    if st != 201:
+        return {"error": f"app install failed ({st})", "raw": data}
+    return {"installed": app, "session": _novm_summary(data) if isinstance(data, dict) else data,
+            "tip": "installed apps appear on the desktop dock; click their icon via vm_click"}
+
+
+async def tool_vm_files(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    path = str(args.get("path") or "").strip()
+    if not sid:
+        return {"error": "vm_files requires an 'id' argument"}
+    q = f"?path={quote(path)}" if path else ""
+    st, txt = await _novm("GET", f"/api/sessions/{sid}/files{q}")
+    data = _novm_json(st, txt)
+    if st != 200:
+        return {"error": f"NoVM files failed ({st})", "raw": data}
+    return {"path": path or "/", "entries": data if isinstance(data, list) else []}
+
+
+async def tool_vm_upload(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    path = str(args.get("path") or "").strip()
+    content = str(args.get("content") or "")
+    if not sid or not path:
+        return {"error": "vm_upload requires 'id', 'path' and 'content'"}
+    b64 = b64encode(content.encode()).decode()
+    st, txt = await _novm("POST", f"/api/sessions/{sid}/files",
+                          {"path": path, "contentBase64": b64})
+    data = _novm_json(st, txt)
+    if st != 201:
+        return {"error": f"upload failed ({st})", "raw": data}
+    return {"uploaded": path, "bytes": len(content.encode()),
+            "tip": "paths are relative to the session home (e.g. Desktop/x.txt)"}
+
+
+async def tool_vm_download(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    path = str(args.get("path") or "").strip()
+    if not sid or not path:
+        return {"error": "vm_download requires 'id' and 'path'"}
+    st, txt = await _novm("GET", f"/api/sessions/{sid}/files/download?path={quote(path)}")
+    if st != 200:
+        return {"error": f"download failed ({st})", "raw": txt[:300]}
+    return {"path": path, "size": len(txt.encode()),
+            "content": txt[:4000],
+            "note": "truncated at 4000 chars; upload back via vm_upload if you need changes"}
+
+
+# ---- VNC harness (pure stdlib: WebSocket client + RFB + PNG encoder) ------
+# Works on self-host where outbound WebSockets are allowed. On Vercel these
+# tools fail fast with a clear message; the HTTP-only tools above still work.
+
+
+class _NovmWS:
+    def __init__(self, host, port, path, tls=True, timeout=25):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        if tls:
+            ctx = ssl.create_default_context()
+            self.sock = ctx.wrap_socket(self.sock, server_hostname=host)
+        key = b64encode(os.urandom(16)).decode()
+        req = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
+               "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        self.sock.sendall(req.encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("ws closed during handshake")
+            resp += chunk
+        if b"101" not in resp.split(b"\r\n", 1)[0]:
+            raise RuntimeError(f"WS handshake failed: {resp[:200]}")
+        self.buf = resp.split(b"\r\n\r\n", 1)[1]
+        self.pbuf = b""
+
+    def _read(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("ws closed")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def send_binary(self, data):
+        header = b"\x82"
+        n = len(data)
+        if n < 126:
+            header += bytes([0x80 | n])
+        elif n < 65536:
+            header += bytes([0x80 | 126]) + struct.pack(">H", n)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack(">Q", n)
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        self.sock.sendall(header + mask + masked)
+
+    def recv_frame(self):
+        while True:
+            h = self._read(2)
+            opcode = h[0] & 0x0F
+            n = h[1] & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._read(8))[0]
+            if h[1] & 0x80:
+                mask = self._read(4)
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(self._read(n)))
+            else:
+                payload = self._read(n)
+            if opcode == 0x9:  # ping -> pong
+                hdr = b"\x8a" + bytes([0x80 | len(payload)])
+                mk = os.urandom(4)
+                self.sock.sendall(hdr + mk + bytes(b ^ mk[i % 4] for i, b in enumerate(payload)))
+                continue
+            if opcode in (0x1, 0x2, 0x0):
+                return opcode, payload
+            if opcode == 0x8:
+                raise RuntimeError("ws closed by peer: " + payload.decode(errors="replace"))
+
+    def recv_rfb(self, n, timeout=60):
+        self.sock.settimeout(timeout)
+        while len(self.pbuf) < n:
+            _, p = self.recv_frame()
+            self.pbuf += p
+        out, self.pbuf = self.pbuf[:n], self.pbuf[n:]
+        return out
+
+
+class _NovmVNC:
+    def __init__(self, ws):
+        self.ws = ws
+        self.pbuf = b""
+        self.w = self.h = 0
+        self._handshake()
+
+    def _recv(self, n, timeout=60):
+        return self.ws.recv_rfb(n, timeout)
+
+    def _handshake(self):
+        self._recv(12)
+        self.ws.send_binary(b"RFB 003.008\n")
+        n = self._recv(1)[0]
+        secs = self._recv(n)
+        if 1 not in secs:
+            raise RuntimeError(f"no None security type: {list(secs)}")
+        self.ws.send_binary(b"\x01")
+        res = self._recv(4)
+        if res != b"\x00\x00\x00\x00":
+            raise RuntimeError(f"VNC auth failed: {res.hex()}")
+        self.ws.send_binary(b"\x01")  # shared
+        si = self._recv(24)
+        self.w, self.h = struct.unpack(">HH", si[:4])
+        nlen = struct.unpack(">I", si[20:24])[0]
+        if nlen:
+            self._recv(nlen)
+        self.ws.send_binary(b"\x02\x00" + b"\x00\x01" + b"\x00\x00\x00\x00")  # Raw
+
+    def pointer(self, mask, x, y):
+        self.ws.send_binary(b"\x05" + bytes([mask]) + struct.pack(">HH", x, y))
+
+    def click(self, x, y, button=1):
+        mask = {1: 1, 2: 4, 3: 2}[button]
+        self.pointer(mask, x, y)
+        time.sleep(0.15)
+        self.pointer(0, x, y)
+
+    def key(self, keysym, down):
+        self.ws.send_binary(b"\x04" + (b"\x01" if down else b"\x00") +
+                            b"\x00\x00" + struct.pack(">I", keysym))
+
+    def type_text(self, text, speed=0.06):
+        for ch in text:
+            if ch == "\n":
+                self.key(0xff0d, True)
+                self.key(0xff0d, False)
+                continue
+            code = ord(ch)
+            if ch.isupper() or ch in "!@#$%^&*()_+{}|:\"<>?~":
+                self.key(0xffe1, True)
+                self.key(code, True)
+                self.key(code, False)
+                self.key(0xffe1, False)
+            else:
+                self.key(code, True)
+                self.key(code, False)
+            time.sleep(speed)
+
+    def screenshot(self):
+        for _ in range(4):
+            self.ws.send_binary(b"\x03\x00" + b"\x00\x00\x00\x00" +
+                                struct.pack(">HH", self.w, self.h))
+            while True:
+                head = self._recv(4)
+                if head[0] != 0:
+                    continue
+                nrect = struct.unpack(">H", head[2:4])[0]
+                data = b""
+                for _ in range(nrect):
+                    rh = self._recv(12)
+                    rw, rhh = struct.unpack(">HH", rh[4:8])
+                    enc = struct.unpack(">i", rh[8:12])[0]
+                    if enc == 0:
+                        data += self._recv(rw * rhh * 4)
+                if data:
+                    return data
+                time.sleep(1)
+        return b""
+
+
+def _png_encode(width, height, rgb):
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + rgb[y * width * 3:(y + 1) * width * 3]
+                   for y in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
+            chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def _novm_vnc_open(sid):
+    """Open a VNC session. Returns (VNC, host)."""
+    base = _NOVM_OK_BASE or NOVM_BASES[0]
+    host = base.split("://", 1)[1].split("/")[0]
+    path = f"/api/sessions/{sid}/connect"
+    st, txt = _novm_sync_post(base, path)
+    if st not in (200, 201):
+        raise RuntimeError(f"connect failed ({st})")
+    data = _novm_json_sync(txt)
+    token = data.get("token") if isinstance(data, dict) else None
+    if not token:
+        raise RuntimeError("no token in connect response")
+    ws = _NovmWS(host, 443, f"/api/vnc/connect/{token}", tls=True)
+    vnc = _NovmVNC(ws)
+    return vnc
+
+
+def _novm_sync_post(base, path, payload=None):
+    req = urllib.request.Request(base + path, data=json.dumps(payload or {}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def _novm_json_sync(txt):
+    try:
+        return json.loads(txt)
+    except Exception:
+        return {"raw": txt[:500]}
+
+
+def _novm_grab(vnc):
+    px = vnc.screenshot()
+    if not px:
+        raise RuntimeError("no framebuffer data (desktop still booting?)")
+    rgb = bytearray()
+    for i in range(0, len(px), 4):
+        b, g, r = px[i], px[i + 1], px[i + 2]
+        rgb += bytes([r, g, b])
+    return b64encode(_png_encode(vnc.w, vnc.h, bytes(rgb))).decode()
+
+
+async def tool_vm_screenshot(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": "vm_screenshot requires an 'id' argument"}
+    try:
+        def _shot():
+            vnc = _novm_vnc_open(sid)
+            time.sleep(6)  # let the desktop paint after connect
+            return _novm_grab(vnc), vnc.w, vnc.h
+        png_b64, w, h = await asyncio.to_thread(_shot)
+    except Exception as e:
+        return {"error": f"vm_screenshot failed: {e}",
+                "hint": "works on self-host; on Vercel outbound WebSockets are unavailable — use vm_connect to view it manually"}
+    return {"image": png_b64, "width": w, "height": h,
+            "view": "/api/vm/screenshot/" + sid}
+
+
+async def _vision_describe(png_b64, prompt="Describe what is on this computer screen in detail."):
+    last = None
+    for att in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(PROVIDER_URLS[OVH], json={
+                    "model": "Qwen2.5-VL-72B-Instruct", "max_tokens": 400,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{png_b64}"}}]}]})
+            d = r.json()
+            if r.status_code == 429 or "rate limit" in r.text.lower():
+                await asyncio.sleep(20 + att * 10)
+                continue
+            if r.status_code != 200:
+                raise RuntimeError(r.text[:200])
+            return d["choices"][0]["message"]["content"]
+        except Exception as e:
+            last = e
+            await asyncio.sleep(10 + att * 5)
+    raise RuntimeError(f"vision unavailable: {last}")
+
+
+async def tool_vm_see(args):
+    """Screenshot the VM and describe it with the vision model — the agent's eyes."""
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    if not sid:
+        return {"error": "vm_see requires an 'id' argument"}
+    try:
+        def _shot():
+            vnc = _novm_vnc_open(sid)
+            time.sleep(6)
+            return _novm_grab(vnc), vnc.w, vnc.h
+        png_b64, w, h = await asyncio.to_thread(_shot)
+    except Exception as e:
+        return {"error": f"vm_see failed: {e}",
+                "hint": "works on self-host; on Vercel use vm_connect for manual viewing"}
+    desc = await _vision_describe(png_b64,
+        "You are the eyes of an autonomous agent. Describe this computer screen in detail: "
+        "what windows are open, what text is visible (quote terminal prompts and commands), "
+        "and what UI elements exist. Be precise and factual.")
+    return {"description": desc, "width": w, "height": h,
+            "view": "/api/vm/screenshot/" + sid}
+
+
+async def tool_vm_key(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    keys = str(args.get("keys") or "")
+    if not sid or not keys:
+        return {"error": "vm_key requires 'id' and 'keys' (use \\n for Enter)"}
+    try:
+        def _type():
+            vnc = _novm_vnc_open(sid)
+            time.sleep(4)
+            vnc.type_text(keys)
+        await asyncio.to_thread(_type)
+    except Exception as e:
+        return {"error": f"vm_key failed: {e}",
+                "hint": "works on self-host; on Vercel use vm_connect"}
+    return {"typed": keys, "note": "keys went to the focused window — use vm_see to confirm"}
+
+
+async def tool_vm_click(args):
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    try:
+        x = int(args.get("x"))
+        y = int(args.get("y"))
+    except Exception:
+        return {"error": "vm_click requires integer 'x' and 'y' (see vm_see for layout)"}
+    button = int(args.get("button") or 1)
+    if not sid:
+        return {"error": "vm_click requires an 'id' argument"}
+    try:
+        def _click():
+            vnc = _novm_vnc_open(sid)
+            time.sleep(4)
+            vnc.click(x, y, button)
+        await asyncio.to_thread(_click)
+    except Exception as e:
+        return {"error": f"vm_click failed: {e}",
+                "hint": "works on self-host; on Vercel use vm_connect"}
+    return {"clicked": [x, y], "button": button,
+            "note": "use vm_see afterwards to observe the result"}
+
+
+async def tool_vm_exec(args):
+    """Open a terminal on the VM, type a shell command, run it and read the output back."""
+    sid = str(args.get("id") or args.get("session") or "").strip()
+    command = str(args.get("command") or "")
+    if not sid or not command:
+        return {"error": "vm_exec requires 'id' and 'command'"}
+    if len(command) > 600:
+        return {"error": "command too long (max 600 chars)"}
+
+    def _run():
+        vnc = _novm_vnc_open(sid)
+        time.sleep(5)
+        # launch terminal via the Application Finder
+        vnc.click(*_NOVM_APPFINDER)
+        time.sleep(4)
+        vnc.type_text(_NOVM_TERM_QUERY, speed=0.08)
+        time.sleep(2)
+        vnc.key(0xff0d, True)
+        vnc.key(0xff0d, False)
+        time.sleep(9)
+        # run the command
+        for line in command.split("\n"):
+            vnc.type_text(line, speed=0.04)
+            time.sleep(0.3)
+            vnc.key(0xff0d, True)
+            vnc.key(0xff0d, False)
+            time.sleep(1.5)
+        time.sleep(4)
+        return _novm_grab(vnc)
+
+    try:
+        png_b64 = await asyncio.to_thread(_run)
+    except Exception as e:
+        return {"error": f"vm_exec failed: {e}",
+                "hint": "works on self-host; on Vercel use vm_connect"}
+    desc = await _vision_describe(png_b64,
+        "A shell command was just run in the terminal on this screen. Quote EXACTLY the last "
+        "few lines of terminal output (the prompt line, the command line, and any output after "
+        "it). Then state in one sentence whether the command appears to have succeeded.")
+    return {"ran": command, "screen": desc, "view": "/api/vm/screenshot/" + sid}
+
+
+# human-accessible screenshot (cached from the last vm_screenshot/vm_see call)
+_VM_SHOTS = {}
+
+
+async def api_vm_screenshot(sid):
+    st, data = await _novm_require_session(sid)
+    if st != 200:
+        return {"error": f"session {sid} not found"}
+    try:
+        def _shot():
+            vnc = _novm_vnc_open(sid)
+            time.sleep(6)
+            return _novm_grab(vnc), vnc.w, vnc.h
+        png_b64, w, h = await asyncio.to_thread(_shot)
+    except Exception as e:
+        return {"error": f"screenshot failed: {e}"}
+    return {"image": png_b64, "width": w, "height": h}
+
+
 TOOL_LABELS = {
     "calculate": "Calculating…",
     "search_web": "Searching the web…",
@@ -1257,6 +1920,27 @@ TOOL_LABELS = {
     "create_skill": "Creating skill…",
     "run_subagent": "Spawning subagent…",
     "ask_user": "Asking you…",
+    "vm_list": "Listing VM sessions…",
+    "vm_create": "Creating VM workstation…",
+    "vm_start": "Booting VM workstation…",
+    "vm_stop": "Stopping VM workstation…",
+    "vm_pause": "Pausing VM workstation…",
+    "vm_resume": "Resuming VM workstation…",
+    "vm_restart": "Restarting VM workstation…",
+    "vm_recover": "Recovering VM workstation…",
+    "vm_delete": "Deleting VM workstation…",
+    "vm_connect": "Opening VM viewer…",
+    "vm_disconnect": "Closing VM viewer…",
+    "vm_status": "Checking VM status…",
+    "vm_install_app": "Installing app on VM…",
+    "vm_files": "Listing VM files…",
+    "vm_upload": "Uploading file to VM…",
+    "vm_download": "Downloading file from VM…",
+    "vm_screenshot": "Grabbing VM screen…",
+    "vm_see": "Looking at VM screen…",
+    "vm_key": "Typing on VM…",
+    "vm_click": "Clicking on VM…",
+    "vm_exec": "Running command on VM…",
 }
 
 TOOL_DESCRIPTIONS = """You have these tools. To call one, output ONLY a single JSON object on its own line:
@@ -1281,6 +1965,26 @@ Tools:
 - create_skill {name, description, instructions}: author a reusable skill
 - run_subagent {task}: delegate a focused subtask to a subagent; it always runs on your current model, works autonomously in the same workspace, and returns a report
 - ask_user {question}: pause and ask the human for an answer; it resumes when they reply
+- vm_list {}: list the user's remote VM workstation sessions
+- vm_create {name?, resolution?}: create a new VM workstation (max 2 at a time; resolution 1280x720 or 1920x1080). VM sessions are user-bound and managed with a permanent id
+- vm_start {id}: boot the desktop of a session
+- vm_stop {id}: shut the desktop down (keeps the session)
+- vm_pause {id} / vm_resume {id}: suspend / restore the desktop
+- vm_restart {id}: reboot the desktop; vm_recover {id}: rescue a broken session
+- vm_delete {id}: permanently remove a session
+- vm_connect {id}: open a live noVNC viewer link (valid ~15 min) for the human
+- vm_disconnect {id}: close the current viewer link
+- vm_status {id}: session state, resolution, uptime
+- vm_install_app {id, app}: install an app (chromium, gedit, mousepad) — appears in the dock
+- vm_files {id, path?}: list files in the VM home directory
+- vm_upload {id, path, content}: write a text file into the VM home
+- vm_download {id, path}: read a file from the VM home
+- vm_screenshot {id}: capture the VM screen as an image and return its view link
+- vm_see {id}: capture the screen AND describe it with a vision model (your eyes on the VM)
+- vm_key {id, keys}: type text into the focused window (\\n is Enter)
+- vm_click {id, x, y, button?}: click at pixel coordinates on the VM screen (button 1 left, 2 middle, 3 right)
+- vm_exec {id, command}: open a terminal, run a shell command on the VM, and read the output back via vision
+Workstation workflow: vm_list → vm_create → vm_start → wait ~15s → vm_see to orient → then drive it with vm_click / vm_key / vm_exec and verify with vm_see. VM ids are permanent — always reuse the session id you already created rather than creating new ones.
 When a tool's result says TOOL FAILED, treat it as a failure: fix and retry or report it — never claim it succeeded.
 When you have everything you need, answer normally WITHOUT a JSON tool line.
 Do not describe tool JSON in prose; either call a tool or answer.
@@ -1417,6 +2121,113 @@ NATIVE_TOOLS = [
                        "Returns the user's answer as text.",
         "parameters": {"type": "object", "properties": {
             "question": {"type": "string"}}, "required": ["question"]}}},
+    {"type": "function", "function": {
+        "name": "vm_list",
+        "description": "List the user's NoVM workstation sessions (id, status, resolution).",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "vm_create",
+        "description": "Create a new VM workstation session. Max 2 at a time.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "resolution": {"type": "string", "enum": ["1280x720", "1920x1080", "800x600"]}},
+            "required": []}}},
+    {"type": "function", "function": {
+        "name": "vm_start", "description": "Boot the desktop of a VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_stop", "description": "Shut down a VM session's desktop (session persists).",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_pause", "description": "Pause a running VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_resume", "description": "Resume a paused VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_restart", "description": "Restart (reboot) a VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_recover", "description": "Recover a broken/errored VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_delete", "description": "Permanently delete a VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_connect",
+        "description": "Open a live noVNC viewer link (valid ~15 min) for the human to watch.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_disconnect", "description": "Close the current viewer link of a session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_status", "description": "Get detailed status of a VM session.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_install_app",
+        "description": "Install an app (chromium, gedit, mousepad) on the VM — appears in the dock.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "app": {"type": "string", "enum": ["chromium", "gedit", "mousepad"]}},
+            "required": ["id", "app"]}}},
+    {"type": "function", "function": {
+        "name": "vm_files", "description": "List files in the VM home directory.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "path": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_upload", "description": "Write a text file into the VM home directory.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "path": {"type": "string"},
+            "content": {"type": "string"}}, "required": ["id", "path", "content"]}}},
+    {"type": "function", "function": {
+        "name": "vm_download", "description": "Read a file from the VM home directory.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "path": {"type": "string"}}, "required": ["id", "path"]}}},
+    {"type": "function", "function": {
+        "name": "vm_screenshot",
+        "description": "Capture the VM screen as an image (returns a view link the user can open). "
+                       "Needs outbound WebSockets — on Vercel this degrades.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_see",
+        "description": "Capture the VM screen and describe it with a vision model — "
+                       "the agent's eyes on the VM. Needs outbound WebSockets.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"}}, "required": ["id"]}}},
+    {"type": "function", "function": {
+        "name": "vm_key", "description": "Type text into the VM's focused window (\\n = Enter).",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "keys": {"type": "string"}}, "required": ["id", "keys"]}}},
+    {"type": "function", "function": {
+        "name": "vm_click", "description": "Click at pixel coordinates on the VM screen.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "button": {"type": "integer", "enum": [1, 2, 3]}},
+            "required": ["id", "x", "y"]}}},
+    {"type": "function", "function": {
+        "name": "vm_exec",
+        "description": "Open a terminal on the VM, run a shell command, and read the output "
+                       "back via the vision model. The full-control path.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "string"},
+            "command": {"type": "string"}}, "required": ["id", "command"]}}},
 ]
 
 
@@ -1479,6 +2290,48 @@ async def run_tool(name, args, conv_id, parent_model=None, budget=None):
         return await tool_run_subagent(args, conv_id, parent_model, budget)
     if name == "ask_user":
         return await tool_ask_user(args, conv_id)
+    if name == "vm_list":
+        return await tool_vm_list(args)
+    if name == "vm_create":
+        return await tool_vm_create(args)
+    if name == "vm_start":
+        return await tool_vm_start(args)
+    if name == "vm_stop":
+        return await tool_vm_stop(args)
+    if name == "vm_pause":
+        return await tool_vm_pause(args)
+    if name == "vm_resume":
+        return await tool_vm_resume(args)
+    if name == "vm_restart":
+        return await tool_vm_restart(args)
+    if name == "vm_recover":
+        return await tool_vm_recover(args)
+    if name == "vm_delete":
+        return await tool_vm_delete(args)
+    if name == "vm_connect":
+        return await tool_vm_connect(args)
+    if name == "vm_disconnect":
+        return await tool_vm_disconnect(args)
+    if name == "vm_status":
+        return await tool_vm_status(args)
+    if name == "vm_install_app":
+        return await tool_vm_install_app(args)
+    if name == "vm_files":
+        return await tool_vm_files(args)
+    if name == "vm_upload":
+        return await tool_vm_upload(args)
+    if name == "vm_download":
+        return await tool_vm_download(args)
+    if name == "vm_screenshot":
+        return await tool_vm_screenshot(args)
+    if name == "vm_see":
+        return await tool_vm_see(args)
+    if name == "vm_key":
+        return await tool_vm_key(args)
+    if name == "vm_click":
+        return await tool_vm_click(args)
+    if name == "vm_exec":
+        return await tool_vm_exec(args)
     return {"error": f"unknown tool {name}"}
 
 
@@ -1786,7 +2639,7 @@ ROUTE_DEFAULT = ["minimax-m27", "hunyuan-3", "mistral-small-32", "qwen36-27b"]
 # Foundry (agent) routes over FRONTIER models only — verified-live ones first.
 FOUNDRY_POOL = ["nemotron-3-ultra", "nemotron-super-120b", "qwen35-397b",
                 "kiro-auto", "minimax-m3", "gemini-36-flash", "qwen37-flash",
-                "deepseek-v4-flash", "gpt-oss-120b", "llama33-70b"]
+                "deepseek-v4-flash", "gpt-oss-120b", "llama33-70b", "qwen38-max"]
 
 
 def foundry_route():
@@ -1809,7 +2662,7 @@ def agent_failover_chain(model_id):
     else:
         chain = ["nemotron-3-ultra", "kiro-auto", "minimax-m3",
                  "gemini-36-flash", "deepseek-v4-flash", "qwen37-flash",
-                 "nemotron-super-120b", "minimax-m27", "hunyuan-3"]
+                 "nemotron-super-120b", "minimax-m27", "hunyuan-3", "qwen38-max"]
     chain = [c for c in chain if c in MODEL_MAP]
     return [model_id] + [c for c in chain if c != model_id]
 
@@ -2891,6 +3744,61 @@ def get_file(name: str):
         raise HTTPException(404)
     mt = "video/mp4" if name.endswith(".mp4") else "image/jpeg"
     return FileResponse(path, media_type=mt)
+
+
+@app.get("/api/vm/screenshot/{sid}")
+async def vm_screenshot_endpoint(sid: str):
+    """Live PNG grab of a NoVM session (works on self-host; fails cleanly on Vercel)."""
+    res = await api_vm_screenshot(sid)
+    if "image" not in res:
+        raise HTTPException(502, res.get("error", "screenshot failed"))
+    import base64 as _b64
+    try:
+        png = _b64.b64decode(res["image"])
+    except Exception:
+        raise HTTPException(502, "bad png payload")
+    return Response(content=png, media_type="image/png")
+
+
+# ---- VM management API for the frontend panel -----------------------------
+@app.get("/api/vm/sessions")
+async def vm_api_list():
+    res = await tool_vm_list({})
+    if "error" in res:
+        raise HTTPException(502, res["error"])
+    return res
+
+
+@app.post("/api/vm/sessions")
+async def vm_api_create(req: Request):
+    body = await req.json()
+    res = await tool_vm_create(body or {})
+    if "error" in res:
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@app.post("/api/vm/sessions/{sid}/{action}")
+async def vm_api_action(sid: str, action: str):
+    if action not in ("start", "stop", "pause", "resume", "restart", "recover",
+                      "connect", "disconnect"):
+        raise HTTPException(400, f"unknown action {action}")
+    fn = {"start": tool_vm_start, "stop": tool_vm_stop, "pause": tool_vm_pause,
+          "resume": tool_vm_resume, "restart": tool_vm_restart,
+          "recover": tool_vm_recover, "connect": tool_vm_connect,
+          "disconnect": tool_vm_disconnect}[action]
+    res = await fn({"id": sid})
+    if "error" in res:
+        raise HTTPException(502, res["error"])
+    return res
+
+
+@app.delete("/api/vm/sessions/{sid}")
+async def vm_api_delete(sid: str):
+    res = await tool_vm_delete({"id": sid})
+    if "error" in res:
+        raise HTTPException(502, res["error"])
+    return res
 
 
 static_dir = os.path.join(ROOT, "static")
