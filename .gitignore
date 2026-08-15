@@ -2,12 +2,18 @@
 .bazaar_key
 .inferera_key
 .logfare_key
+.opencode_key
+.admin_password
 *.key
 
 # local runtime state
 arena.db
 arena-data/
+colosseum.db
 generated/
+server.log
+server.err.log
+skills-user/
 
 # python
 __pycache__/
