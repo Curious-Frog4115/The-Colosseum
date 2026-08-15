@@ -126,6 +126,11 @@ def _client():
     return _TC
 
 
+def _login():
+    """Dev-mode sign-in (Google not configured in tests) — the owner account."""
+    return _client().post("/api/auth/dev", json={"password": "ai4freeadmin"})
+
+
 def test_admin_unlock_flow():
     c = _client()
     assert c.get("/api/admin/status").json()["unlocked"] is False
@@ -140,20 +145,49 @@ def test_admin_unlock_flow():
     assert c.get("/api/admin/status").json()["unlocked"] is False
 
 
+def test_auth_gates_and_dev_login():
+    c = _client()
+    assert c.get("/api/auth/me").status_code == 401
+    assert c.post("/api/chat", json={"prompt": "hi", "model_id": "qwen35-397b",
+                                     "conversation_id": ""}).status_code == 401
+    assert c.get("/api/conversations").status_code == 401
+    assert c.post("/api/auth/dev", json={"password": "wrong"}).status_code == 403
+    r = _login()
+    assert r.status_code == 200 and r.json()["user"]["sub"] == "dev"
+    me = c.get("/api/auth/me").json()
+    assert me["user"]["admin"] is True and me["google"] is False
+    assert c.get("/api/conversations").status_code == 200
+    assert c.post("/api/auth/logout").status_code == 200
+    assert c.get("/api/auth/me").status_code == 401
+
+
 def test_direct_chat_gate():
     c = _client()
+    _login()  # dev login is the admin account — frontier gate lifts
     body = {"prompt": "hi", "model_id": "qwen35-397b", "conversation_id": ""}
-    locked = c.post("/api/chat", json=body)
-    assert locked.status_code == 403
-    c.post("/api/admin/unlock", json={"password": "ai4freeadmin"})
     unlocked = c.post("/api/chat", json=body)
     assert unlocked.status_code == 200  # gate passes; stream not consumed here
     unlocked.close()
-    c.post("/api/admin/lock", json={"password": "ai4freeadmin"})
+
+
+def test_user_scoped_conversations():
+    c = _client()
+    _login()
+    r = c.post("/api/conversations", json={"title": "scope test"})
+    assert r.status_code == 200
+    cid = r.json()["id"]
+    got = c.get(f"/api/conversations/{cid}")
+    assert got.status_code == 200
+    # a logged-out client can't see or touch it
+    c.post("/api/auth/logout")
+    assert c.get(f"/api/conversations/{cid}").status_code == 401
+    assert c.delete(f"/api/conversations/{cid}").status_code == 401
+    assert c.patch(f"/api/conversations/{cid}", json={"title": "x"}).status_code == 401
 
 
 def test_workspace_zip_and_download():
     c = _client()
+    _login()
     main.tool_create_file({"name": "index.html", "content": "<h1>zip</h1>"}, CONV)
     main.tool_create_file({"name": "style.css", "content": "body{}"}, CONV)
     r = c.get(f"/api/canvas/{CONV}")

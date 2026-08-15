@@ -5,6 +5,7 @@
 .opencode_key
 .freerouter_key
 .admin_password
+.arena_secret
 *.key
 
 # local runtime state

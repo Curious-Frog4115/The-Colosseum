@@ -12,10 +12,13 @@ tracked internally, never shown in blind battles.
 """
 import asyncio
 import base64 as b64
+import hashlib
+import hmac
 import json
 import os
 import random
 import re
+import secrets
 import socket
 import ssl
 import sqlite3
@@ -26,6 +29,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import zlib
@@ -35,7 +39,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -502,7 +506,8 @@ def init_db():
         provider_a TEXT, provider_b TEXT,
         latency_a REAL, latency_b REAL, ok_a INTEGER, ok_b INTEGER);
     CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY, title TEXT, created REAL, updated REAL);
+        id TEXT PRIMARY KEY, title TEXT, created REAL, updated REAL,
+        user_sub TEXT);
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT,
         model_id TEXT, ts REAL, extra TEXT);
@@ -522,6 +527,10 @@ def init_db():
         conn.execute("ALTER TABLE battles ADD COLUMN effort_a TEXT")
     if "effort_b" not in cols:
         conn.execute("ALTER TABLE battles ADD COLUMN effort_b TEXT")
+    # migration: per-user ownership of conversations (auth)
+    ccols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)")}
+    if "user_sub" not in ccols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN user_sub TEXT")
     conn.commit()
     conn.close()
 
@@ -572,7 +581,12 @@ def set_setting(key, value):
 
 
 def admin_unlocked():
+    """Legacy server-side flag (SQLite). On Vercel the filesystem is per-instance
+    so this does NOT persist — the cookie-based `request_is_admin` is the
+    reliable check. Kept for self-host backward compatibility."""
     return get_setting("admin_unlocked", "0") == "1"
+
+
 
 
 # ============================================================ core inference
@@ -2642,8 +2656,8 @@ FOUNDRY_POOL = ["nemotron-3-ultra", "nemotron-super-120b", "qwen35-397b",
                 "deepseek-v4-flash", "gpt-oss-120b", "llama33-70b", "qwen38-max"]
 
 
-def foundry_route():
-    if admin_unlocked():
+def foundry_route(is_admin=False):
+    if is_admin or admin_unlocked():
         # admin mode: Foundry may route over the entire text catalog
         pool = [mid for mid, m in MODEL_MAP.items() if m["category"] != "vision"]
     else:
@@ -2654,10 +2668,10 @@ def foundry_route():
     return random.choice(pool[:3])
 
 
-def agent_failover_chain(model_id):
+def agent_failover_chain(model_id, is_admin=False):
     """Models the agent loop falls over to when a route chokes mid-turn.
     Frontier-first when admin unlock is on."""
-    if admin_unlocked():
+    if is_admin or admin_unlocked():
         chain = [m["id"] for m in MODELS if m["category"] in ("frontier", "coding")]
     else:
         chain = ["nemotron-3-ultra", "kiro-auto", "minimax-m3",
@@ -2748,6 +2762,297 @@ async def lifespan(app):
 
 app = FastAPI(title="The Colosseum", lifespan=lifespan)
 
+# ============================================================ auth
+# Stateless, Vercel-safe accounts: signed cookies only, no server-side
+# session table. Google OAuth when GOOGLE_CLIENT_ID/SECRET are configured;
+# otherwise a dev-mode password sign-in (admin password) keeps self-host
+# usable until the owner configures Google.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_OAUTH = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO = "https://www.googleapis.com/oauth2/v2/userinfo"
+GOOGLE_REDIRECT = "/api/auth/google/callback"
+
+_SECRET = None
+
+
+def arena_secret():
+    """HMAC signing secret: env ARENA_SECRET > .arena_secret file > persisted DB."""
+    global _SECRET
+    if _SECRET:
+        return _SECRET
+    s = os.environ.get("ARENA_SECRET", "")
+    if not s:
+        try:
+            f = os.path.join(ROOT, ".arena_secret")
+            if os.path.exists(f):
+                s = open(f).read().strip()
+        except Exception:
+            pass
+    if not s:
+        s = get_setting("arena_secret", "")
+    if not s:
+        s = secrets.token_hex(32)
+        set_setting("arena_secret", s)
+    _SECRET = s
+    return s
+
+
+def _sign(payload, ttl_seconds):
+    body = json.dumps(payload, separators=(",", ":"))
+    exp = int(time.time()) + ttl_seconds
+    data = f"{exp}.{body}"
+    sig = hmac.new(arena_secret().encode(), data.encode(), hashlib.sha256).hexdigest()[:32]
+    return b64.b64encode(f"{data}.{sig}".encode()).decode()
+
+
+def _verify(token):
+    if not token:
+        return None
+    try:
+        raw = b64.b64decode(token.encode()).decode()
+        data, sig = raw.rsplit(".", 1)
+        exp_s, body = data.split(".", 1)
+        expect = hmac.new(arena_secret().encode(), data.encode(),
+                          hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(expect, sig):
+            return None
+        if int(exp_s) < time.time():
+            return None
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+def _cookie(name, token, max_age, secure=None):
+    c = f"{name}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax"
+    if secure is None:
+        secure = os.environ.get("VERCEL", "") == "1"
+    if secure:
+        c += "; Secure"
+    return c
+
+
+def user_from_request(request):
+    return _verify(request.cookies.get("arena_sid"))
+
+
+def require_user(request):
+    u = user_from_request(request)
+    if not u:
+        raise HTTPException(401, "login required")
+    return u
+
+
+def request_is_admin(request):
+    """Cookie-based admin check — works on Vercel (no shared filesystem)."""
+    if _verify(request.cookies.get("arena_admin")):
+        return True
+    u = user_from_request(request)
+    return bool(u and u.get("admin"))
+
+
+def _client_ip(request):
+    return (request.headers.get("x-forwarded-for") or
+            request.client.host if request.client else "unknown")
+
+
+def _make_auth_response(user, redirect=None):
+    """Issue session + admin cookies and redirect (OAuth) or return JSON."""
+    sid = _sign({"sub": user["sub"], "email": user.get("email", ""),
+                 "name": user.get("name", ""), "admin": bool(user.get("admin"))}, 30 * 86400)
+    cookies = [_cookie("arena_sid", sid, 30 * 86400)]
+    if user.get("admin"):
+        cookies.append(_cookie("arena_admin", _sign({"ok": 1}, 30 * 86400), 30 * 86400))
+    if redirect:
+        r = RedirectResponse(redirect, status_code=302)
+        for c in cookies:
+            r.headers.append("Set-Cookie", c)
+        return r
+    r = JSONResponse({"user": {"sub": user["sub"], "email": user.get("email", ""),
+                               "name": user.get("name", ""), "admin": bool(user.get("admin"))}})
+    for c in cookies:
+        r.headers.append("Set-Cookie", c)
+    return r
+
+
+def _user_owns_conv(cid, sub):
+    conn = db()
+    row = conn.execute("SELECT user_sub FROM conversations WHERE id=?",
+                       (cid,)).fetchone()
+    conn.close()
+    if row is None:
+        return None  # conversation does not exist
+    owner = row["user_sub"]
+    return owner is None or owner == "" or owner == sub
+
+
+# ---------------- Google OAuth flow
+class PasswordReq(BaseModel):
+    password: str = ""
+
+
+class CaptchaReq(BaseModel):
+    id: str = ""
+    answer: str = ""
+
+
+@app.get("/api/auth/google/start")
+def auth_google_start(request: Request):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(501, "google sign-in is not configured on this server")
+    state = _sign({"nonce": secrets.token_hex(8)}, 300)
+    params = urllib.parse.urlencode({
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": request.base_url._url.rstrip("/") + GOOGLE_REDIRECT,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+    })
+    return RedirectResponse(f"{GOOGLE_OAUTH}?{params}")
+
+
+@app.get("/api/auth/google/callback")
+async def auth_google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error:
+        return RedirectResponse("/?auth=error")
+    if not code or not _verify(state):
+        return RedirectResponse("/?auth=error")
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return RedirectResponse("/?auth=error")
+    redirect_uri = request.base_url._url.rstrip("/") + GOOGLE_REDIRECT
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(GOOGLE_TOKEN, data={
+            "code": code, "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": redirect_uri, "grant_type": "authorization_code"})
+        if r.status_code != 200:
+            return RedirectResponse("/?auth=error")
+        tok = r.json().get("access_token")
+        if not tok:
+            return RedirectResponse("/?auth=error")
+        ui = await c.get(GOOGLE_USERINFO,
+                         headers={"Authorization": f"Bearer {tok}"})
+        if ui.status_code != 200:
+            return RedirectResponse("/?auth=error")
+        info = ui.json()
+    user = {"sub": "g:" + (info.get("id") or info.get("sub") or ""),
+            "email": info.get("email", ""),
+            "name": info.get("name", "") or info.get("email", "").split("@")[0]}
+    if not user["sub"] or user["sub"] == "g:":
+        return RedirectResponse("/?auth=error")
+    return _make_auth_response(user, redirect="/?auth=ok")
+
+
+@app.post("/api/auth/dev")
+def auth_dev(req: PasswordReq, request: Request):
+    """Dev-mode sign-in: only when Google is not configured. Uses the admin
+    password so a misconfigured deploy isn't open to everyone."""
+    if GOOGLE_CLIENT_ID:
+        raise HTTPException(403, "google sign-in is configured — use it")
+    if not ADMIN_PASSWORD:
+        raise HTTPException(501, "no sign-in method configured (set GOOGLE_CLIENT_ID or ADMIN_PASSWORD)")
+    if not hmac.compare_digest(req.password or "", ADMIN_PASSWORD):
+        raise HTTPException(403, "wrong password")
+    return _make_auth_response({"sub": "dev", "email": "dev@local",
+                                "name": "Owner", "admin": True})
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    r = JSONResponse({"ok": True})
+    r.headers.append("Set-Cookie", _cookie("arena_sid", "", 0))
+    r.headers.append("Set-Cookie", _cookie("arena_admin", "", 0))
+    return r
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    u = user_from_request(request)
+    if not u:
+        raise HTTPException(401, "not logged in")
+    return {"user": {"sub": u["sub"], "email": u.get("email", ""),
+                     "name": u.get("name", ""), "admin": bool(u.get("admin"))},
+            "google": bool(GOOGLE_CLIENT_ID),
+            "admin_set": bool(ADMIN_PASSWORD)}
+
+
+# ============================================================ rate limiting
+# Gentle per-IP sliding window on expensive endpoints. When a user trips it
+# without a trusted cookie, they get a tiny arithmetic captcha; solving it
+# issues a signed trusted cookie so the session keeps flowing. Not crazy.
+_RATE = {}
+_CAPTCHA = {}
+_RATE_LOCK = threading.Lock()
+RATE_LIMIT = 15          # requests per window per IP
+RATE_WINDOW = 60         # seconds
+CAPTCHA_TTL = 300        # seconds
+
+
+def _rate_hit(key, limit=RATE_LIMIT, window=RATE_WINDOW):
+    now = time.time()
+    with _RATE_LOCK:
+        q = _RATE.setdefault(key, [])
+        while q and q[0] < now - window:
+            q.pop(0)
+        if len(q) >= limit:
+            return True
+        q.append(now)
+        if len(_RATE) > 5000:
+            _RATE.clear()
+        return False
+
+
+def _make_captcha():
+    a, b, op = random.randint(2, 9), random.randint(2, 9), random.choice("+-*")
+    ans = {"+": a + b, "-": a - b, "*": a * b}[op]
+    cid = secrets.token_hex(6)
+    _CAPTCHA[cid] = {"q": f"{a} {op} {b}", "ans": str(ans), "exp": time.time() + CAPTCHA_TTL}
+    if len(_CAPTCHA) > 2000:
+        _CAPTCHA.clear()
+    return {"id": cid, "q": f"What is {a} {op} {b}?"}
+
+
+def captcha_for(request):
+    """Return captcha payload if the IP is over the limit without a trusted cookie."""
+    if _verify(request.cookies.get("arena_ok")):
+        return None
+    if _rate_hit(_client_ip(request)):
+        return _make_captcha()
+    return None
+
+
+@app.get("/api/captcha")
+def api_captcha_new(request: Request):
+    ip = _client_ip(request)
+    with _RATE_LOCK:
+        hits = len([t for t in _RATE.get(ip, []) if t > time.time() - RATE_WINDOW])
+    if hits < 3:  # don't hand out captchas for free — only when actually throttled
+        raise HTTPException(400, "not throttled")
+    return _make_captcha()
+
+
+@app.post("/api/captcha/verify")
+def api_captcha_verify(req: CaptchaReq):
+    c = _CAPTCHA.pop(req.id, None)
+    if not c or c["exp"] < time.time():
+        raise HTTPException(400, "captcha expired — refresh the page")
+    if hmac.compare_digest(c["ans"], req.answer.strip()):
+        r = JSONResponse({"ok": True})
+        r.headers.append("Set-Cookie", _cookie("arena_ok", _sign({"ok": 1}, 24 * 3600),
+                                               24 * 3600))
+        return r
+    raise HTTPException(400, "wrong answer — try again")
+
+
+def maybe_throttle(request):
+    """Call at the top of expensive endpoints. 429 with a captcha when needed."""
+    cap = captcha_for(request)
+    if cap:
+        raise HTTPException(429, {"error": "slow down", "captcha": cap})
+
+
 
 class BattleReq(BaseModel):
     prompt: str
@@ -2811,8 +3116,8 @@ DIRECT_CATEGORIES = {"general", "fast", "small", "coding"}
 
 
 @app.get("/api/models")
-def api_models():
-    unlocked = admin_unlocked()
+def api_models(request: Request):
+    unlocked = request_is_admin(request) or admin_unlocked()
     return {"models": [{**{k: m[k] for k in ("id", "name", "org", "category", "ctx")},
                         "reasoning": REASONING_LEVELS.get(m["id"]) or [],
                         "direct": m["category"] in DIRECT_CATEGORIES or unlocked}
@@ -2852,7 +3157,9 @@ def api_skills_get(slug: str):
 
 
 @app.post("/api/skills")
-def api_skills_create(req: SkillReq):
+def api_skills_create(req: SkillReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     try:
         res = save_skill(req.name, req.description, req.instructions)
     except ValueError as e:
@@ -2861,7 +3168,9 @@ def api_skills_create(req: SkillReq):
 
 
 @app.put("/api/skills/{slug}")
-def api_skills_update(slug: str, req: SkillReq):
+def api_skills_update(slug: str, req: SkillReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     cur = get_skill(slug)
     if not cur:
         raise HTTPException(404, "skill not found")
@@ -2875,7 +3184,8 @@ def api_skills_update(slug: str, req: SkillReq):
 
 
 @app.delete("/api/skills/{slug}")
-def api_skills_delete(slug: str):
+def api_skills_delete(slug: str, request: Request):
+    require_user(request)
     res = delete_skill(slug)
     if "error" in res:
         raise HTTPException(404 if "not found" in res["error"] else 403, res["error"])
@@ -2883,8 +3193,11 @@ def api_skills_delete(slug: str):
 
 
 @app.post("/api/answer")
-def api_answer(req: AnswerReq):
+def api_answer(req: AnswerReq, request: Request):
     """Resolve a pending ask_user question for a conversation."""
+    u = require_user(request)
+    if not _user_owns_conv(req.conversation_id, u["sub"]):
+        raise HTTPException(403, "not your conversation")
     ans = req.answer.strip()[:2000]
     if not ans:
         raise HTTPException(400, "empty answer")
@@ -2897,11 +3210,15 @@ def api_answer(req: AnswerReq):
 
 
 @app.post("/api/continue")
-def api_continue(req: ContinueReq):
+def api_continue(req: ContinueReq, request: Request):
     """Re-send a continuation prompt so the agent keeps working on its task."""
+    u = require_user(request)
     cid = req.conversation_id.strip()
     if not cid:
         raise HTTPException(400, "no conversation")
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
+    maybe_throttle(request)
     conn = db()
     rows = conn.execute(
         "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY ts DESC LIMIT 12",
@@ -2917,8 +3234,9 @@ def api_continue(req: ContinueReq):
         prompt += f" Keep going until this is fully done: {goal}"
     prompt += (" Work autonomously — use tools, check results, and don't stop until the "
                "task is complete. Then give a final summary of the outcome.")
-    model_id = foundry_route()
-    return StreamingResponse(agent_loop(cid, model_id, prompt, hist_msgs),
+    model_id = foundry_route(request_is_admin(request))
+    return StreamingResponse(agent_loop(cid, model_id, prompt, hist_msgs,
+                                        is_admin=request_is_admin(request)),
                              media_type="application/x-ndjson")
 
 
@@ -2937,8 +3255,8 @@ PROVIDER_LABELS = {
 
 
 @app.get("/api/admin/models")
-def api_admin_models():
-    if not admin_unlocked():
+def api_admin_models(request: Request):
+    if not (request_is_admin(request) or admin_unlocked()):
         raise HTTPException(403, "admin required")
     # provider -> [ {id, name, org, category, ctx} ] from every catalog row
     by_provider = {}
@@ -3005,14 +3323,13 @@ def _client_ip(request):
 
 
 @app.get("/api/admin/status")
-def admin_status():
-    return {"unlocked": admin_unlocked(),
+def admin_status(request: Request):
+    return {"unlocked": request_is_admin(request) or admin_unlocked(),
             "password_set": bool(ADMIN_PASSWORD)}
 
 
 @app.post("/api/admin/unlock")
 def admin_unlock(req: AdminReq, request: Request):
-    import hmac
     if not ADMIN_PASSWORD:
         raise HTTPException(403, "admin password not configured on this server")
     ip = _client_ip(request)
@@ -3025,12 +3342,14 @@ def admin_unlock(req: AdminReq, request: Request):
     with _ADMIN_LOCK:
         _ADMIN_ATTEMPTS.pop(ip, None)
     set_setting("admin_unlocked", "1")
-    return {"unlocked": True}
+    r = JSONResponse({"unlocked": True})
+    r.headers.append("Set-Cookie", _cookie("arena_admin", _sign({"ok": 1}, 30 * 86400),
+                                           30 * 86400))
+    return r
 
 
 @app.post("/api/admin/lock")
 def admin_lock(req: AdminReq, request: Request):
-    import hmac
     if not ADMIN_PASSWORD:
         raise HTTPException(403, "admin password not configured on this server")
     ip = _client_ip(request)
@@ -3043,7 +3362,9 @@ def admin_lock(req: AdminReq, request: Request):
     with _ADMIN_LOCK:
         _ADMIN_ATTEMPTS.pop(ip, None)
     set_setting("admin_unlocked", "0")
-    return {"unlocked": False}
+    r = JSONResponse({"unlocked": False})
+    r.headers.append("Set-Cookie", _cookie("arena_admin", "", 0))
+    return r
 
 
 # ---------------- battles
@@ -3059,7 +3380,9 @@ def _open_battle(prompt, kind, a_id, b_id, effort_a="", effort_b=""):
 
 
 @app.post("/api/battle")
-async def battle(req: BattleReq):
+async def battle(req: BattleReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
     # battle is fully random across the effort-split pool
@@ -3153,7 +3476,9 @@ async def battle(req: BattleReq):
 
 
 @app.post("/api/battle/{bid}/vote")
-def vote(bid: str, req: VoteReq):
+def vote(bid: str, req: VoteReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     conn = db()
     row = conn.execute("SELECT * FROM battles WHERE id=?", (bid,)).fetchone()
     if not row:
@@ -3189,7 +3514,9 @@ def vote(bid: str, req: VoteReq):
 
 
 @app.post("/api/image_battle")
-async def image_battle(req: ImgBattleReq):
+async def image_battle(req: ImgBattleReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
     a, b = random.sample(IMAGE_MODELS, 2)
@@ -3237,13 +3564,19 @@ def leaderboard():
 
 # ---------------- workspace (agent-created files)
 @app.get("/api/canvas/{cid}")
-def canvas_list(cid: str):
+def canvas_list(cid: str, request: Request):
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
     return {"files": canvas_file_list(cid)}
 
 
 @app.get("/api/canvas/{cid}/zip")
-def canvas_zip(cid: str):
+def canvas_zip(cid: str, request: Request):
     """Download every workspace file as a single zip."""
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
     import io
     import zipfile
     conn = db()
@@ -3265,26 +3598,34 @@ def canvas_zip(cid: str):
 
 # ---------------- conversations
 @app.get("/api/conversations")
-def list_convs():
+def list_convs(request: Request):
+    u = require_user(request)
     conn = db()
-    rows = conn.execute("SELECT * FROM conversations ORDER BY updated DESC").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM conversations WHERE user_sub IS NULL OR user_sub=? "
+        "ORDER BY updated DESC", (u["sub"],)).fetchall()
     conn.close()
     return {"conversations": [dict(r) for r in rows]}
 
 
 @app.post("/api/conversations")
-def create_conv(req: ConvReq):
+def create_conv(req: ConvReq, request: Request):
+    u = require_user(request)
+    maybe_throttle(request)
     cid = str(uuid.uuid4())
     conn = db()
-    conn.execute("INSERT INTO conversations VALUES (?,?,?,?)",
-                 (cid, req.title, time.time(), time.time()))
+    conn.execute("INSERT INTO conversations VALUES (?,?,?,?,?)",
+                 (cid, req.title, time.time(), time.time(), u["sub"]))
     conn.commit()
     conn.close()
     return {"id": cid, "title": req.title}
 
 
 @app.get("/api/conversations/{cid}")
-def get_conv(cid: str):
+def get_conv(cid: str, request: Request):
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
     conn = db()
     msgs = conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY ts",
                         (cid,)).fetchall()
@@ -3296,7 +3637,10 @@ def get_conv(cid: str):
 
 
 @app.patch("/api/conversations/{cid}")
-def rename_conv(cid: str, req: RenameReq):
+def rename_conv(cid: str, req: RenameReq, request: Request):
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
     conn = db()
     conn.execute("UPDATE conversations SET title=? WHERE id=?", (req.title[:80], cid))
     conn.commit()
@@ -3305,7 +3649,10 @@ def rename_conv(cid: str, req: RenameReq):
 
 
 @app.delete("/api/conversations/{cid}")
-def delete_conv(cid: str):
+def delete_conv(cid: str, request: Request):
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
     conn = db()
     conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
     conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
@@ -3326,31 +3673,36 @@ def save_msg(cid, role, content, model_id="", extra=""):
 
 # ---------------- chat + agent
 @app.post("/api/chat")
-async def chat(req: ChatReq):
+async def chat(req: ChatReq, request: Request):
+    u = require_user(request)
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
+    maybe_throttle(request)
     cid = req.conversation_id
     if not cid:
         cid = str(uuid.uuid4())
         conn = db()
         title = req.prompt[:48] + ("…" if len(req.prompt) > 48 else "")
-        conn.execute("INSERT INTO conversations VALUES (?,?,?,?)",
-                     (cid, title, time.time(), time.time()))
+        conn.execute("INSERT INTO conversations VALUES (?,?,?,?,?)",
+                     (cid, title, time.time(), time.time(), u["sub"]))
         conn.commit()
         conn.close()
+    elif _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
 
     model_id = req.model_id
     is_agent = req.agent or req.model_id == "agent"
+    is_admin = request_is_admin(request) or admin_unlocked()
     if is_agent:
         # Foundry is a router over frontier models — user never picks
-        model_id = foundry_route()
+        model_id = foundry_route(is_admin)
     elif model_id == "auto":
         model_id = route_model(req.prompt)
     if model_id not in MODEL_MAP:
         raise HTTPException(404, "unknown model")
     # frontier/reasoning/vision models are battle-only in DIRECT chat;
     # admin unlock lifts that restriction; Foundry (agent) is always allowed them
-    if not is_agent and not admin_unlocked() and \
+    if not is_agent and not is_admin and \
             MODEL_MAP[model_id]["category"] not in DIRECT_CATEGORIES:
         raise HTTPException(403, "This model is battle-only. Meet it in the arena.")
 
@@ -3371,7 +3723,8 @@ async def chat(req: ChatReq):
     save_msg(cid, "user", req.prompt)
 
     if is_agent:
-        return StreamingResponse(agent_loop(cid, model_id, req.prompt, hist_msgs),
+        return StreamingResponse(agent_loop(cid, model_id, req.prompt, hist_msgs,
+                                            is_admin=is_admin),
                                  media_type="application/x-ndjson")
 
     async def gen():
@@ -3442,7 +3795,7 @@ def clean_final(text):
                      if not TOOL_RE.match(l.strip())).strip()
 
 
-async def agent_loop(cid, model_id, prompt, hist_msgs):
+async def agent_loop(cid, model_id, prompt, hist_msgs, is_admin=False):
     # Foundry is a router — the underlying frontier model is not surfaced
     yield json.dumps({"type": "start", "conversation_id": cid,
                       "model": "Foundry"}) + "\n"
@@ -3462,7 +3815,7 @@ async def agent_loop(cid, model_id, prompt, hist_msgs):
              {"role": "system", "content": _skills_catalog()}] + hist_msgs
             + [{"role": "user", "content": prompt}])
     # if the chosen model's providers choke mid-loop, fall over to alternates
-    agent_chain = agent_failover_chain(model_id)
+    agent_chain = agent_failover_chain(model_id, is_admin)
     final = ""
     buf = ""
     last_result = None
@@ -3626,7 +3979,9 @@ async def agent_loop(cid, model_id, prompt, hist_msgs):
 
 # ---------------- image generation (direct)
 @app.post("/api/image/generate")
-async def image_generate(req: ImgReq):
+async def image_generate(req: ImgReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
     m = IMAGE_MAP.get(req.model_id, IMAGE_MODELS[0])
@@ -3653,7 +4008,9 @@ async def image_generate(req: ImgReq):
 
 # ---------------- video (honestly labeled keyframe pipeline)
 @app.post("/api/video/generate")
-async def video_generate(req: VideoReq):
+async def video_generate(req: VideoReq, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     if not req.prompt.strip():
         raise HTTPException(400, "empty prompt")
 
@@ -3738,7 +4095,8 @@ def published_index(cid: str):
 
 
 @app.get("/api/file/{name}")
-def get_file(name: str):
+def get_file(name: str, request: Request):
+    require_user(request)
     path = os.path.join(GEN_DIR, os.path.basename(name))
     if not os.path.exists(path):
         raise HTTPException(404)
@@ -3747,8 +4105,9 @@ def get_file(name: str):
 
 
 @app.get("/api/vm/screenshot/{sid}")
-async def vm_screenshot_endpoint(sid: str):
+async def vm_screenshot_endpoint(sid: str, request: Request):
     """Live PNG grab of a NoVM session (works on self-host; fails cleanly on Vercel)."""
+    require_user(request)
     res = await api_vm_screenshot(sid)
     if "image" not in res:
         raise HTTPException(502, res.get("error", "screenshot failed"))
@@ -3762,7 +4121,8 @@ async def vm_screenshot_endpoint(sid: str):
 
 # ---- VM management API for the frontend panel -----------------------------
 @app.get("/api/vm/sessions")
-async def vm_api_list():
+async def vm_api_list(request: Request):
+    require_user(request)
     res = await tool_vm_list({})
     if "error" in res:
         raise HTTPException(502, res["error"])
@@ -3771,6 +4131,8 @@ async def vm_api_list():
 
 @app.post("/api/vm/sessions")
 async def vm_api_create(req: Request):
+    require_user(req)
+    maybe_throttle(req)
     body = await req.json()
     res = await tool_vm_create(body or {})
     if "error" in res:
@@ -3779,7 +4141,9 @@ async def vm_api_create(req: Request):
 
 
 @app.post("/api/vm/sessions/{sid}/{action}")
-async def vm_api_action(sid: str, action: str):
+async def vm_api_action(sid: str, action: str, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     if action not in ("start", "stop", "pause", "resume", "restart", "recover",
                       "connect", "disconnect"):
         raise HTTPException(400, f"unknown action {action}")
@@ -3794,7 +4158,9 @@ async def vm_api_action(sid: str, action: str):
 
 
 @app.delete("/api/vm/sessions/{sid}")
-async def vm_api_delete(sid: str):
+async def vm_api_delete(sid: str, request: Request):
+    require_user(request)
+    maybe_throttle(request)
     res = await tool_vm_delete({"id": sid})
     if "error" in res:
         raise HTTPException(502, res["error"])
