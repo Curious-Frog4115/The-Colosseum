@@ -77,6 +77,7 @@ LOGFARE = "logfare"
 INFERERA = "inferera"
 OPENCODE = "opencode"
 FREEROUTER = "freerouter"
+CRAX = "crax"
 
 PROVIDER_URLS = {
     LOGFARE: "https://logfare.ai/v1/chat/completions",
@@ -4288,6 +4289,16 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 @app.get("/")
 def index():
     return FileResponse(os.path.join(static_dir, "index.html"))
+
+
+@app.get("/privacy")
+def privacy():
+    return FileResponse(os.path.join(static_dir, "privacy.html"))
+
+
+@app.get("/terms")
+def terms():
+    return FileResponse(os.path.join(static_dir, "terms.html"))
 
 
 if __name__ == "__main__":
