@@ -628,16 +628,18 @@
   video{box-shadow:0 0 0 1px rgba(255,154,60,.2),0 12px 40px rgba(0,0,0,.4),0 0 30px rgba(255,138,42,.14)}
   .samples button:hover{box-shadow:var(--glow-acc)}
 
-  /* vm workstations (foundry panel) */
-  #foundryVm{margin-top:18px;border:1px solid rgba(255,154,60,.2);border-radius:14px;
+  /* vm workstations — passive watcher inside Foundry */
+  #vmWatch{margin-top:18px;border:1px solid rgba(255,154,60,.2);border-radius:14px;
     padding:14px 16px 18px;background:linear-gradient(180deg,rgba(14,12,11,.9),rgba(10,9,8,.95))}
-  .vm-btn{background:var(--acc-grad);border:none;color:#140f0a;font-weight:600;padding:8px 14px;
-    border-radius:8px;cursor:pointer;font-size:12.5px;display:inline-flex;gap:6px;align-items:center}
-  .vm-btn svg{stroke:#140f0a}
-  .vm-btn.ghost{background:transparent;border:1px solid rgba(255,154,60,.3);color:var(--acc2)}
-  .vm-btn.ghost svg{stroke:var(--acc2)}
-  .vm-btn.small{padding:4px 10px;font-size:11.5px}
-  .vm-note{font-size:11.5px;color:var(--muted2);font-family:var(--mono)}
+  .vw-head{display:flex;align-items:baseline;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .vw-ttl{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:700;color:var(--cream);letter-spacing:.02em}
+  .vw-ttl svg{color:var(--acc2)}
+  .vw-note{font-size:11.5px;color:var(--muted2);font-family:var(--mono)}
+  .vw-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--muted2);margin-right:6px;vertical-align:1px}
+  .vw-dot.on{background:var(--green);box-shadow:0 0 6px rgba(162,211,124,.8)}
+  .vw-dot.pa{background:var(--acc);box-shadow:0 0 6px rgba(255,154,60,.8)}
+  .vw-dot.cr{background:var(--acc);box-shadow:0 0 6px rgba(255,154,60,.8);animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.35}}
   .vm-cols{display:grid;grid-template-columns:340px 1fr;gap:14px;align-items:start}
   .vm-list{display:flex;flex-direction:column;gap:8px;max-height:70vh;overflow:auto}
   .vm-card{border:1px solid rgba(255,154,60,.16);border-radius:10px;padding:10px 12px;
@@ -646,18 +648,11 @@
   .vm-card.on{border-left:3px solid var(--green)}
   .vm-card-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
   .vm-card-top b{font-size:13px;color:var(--cream)}
-  .vm-card-meta{font-size:11px;color:var(--muted2);font-family:var(--mono);margin:4px 0 8px}
+  .vm-card-meta{font-size:11px;color:var(--muted2);font-family:var(--mono);margin:4px 0 0}
   .vm-badge{font-size:10px;padding:2px 8px;border-radius:99px;border:1px solid var(--border2);
     color:var(--muted2);text-transform:uppercase;letter-spacing:.06em}
   .vm-badge.st-running{color:var(--green);border-color:rgba(162,211,124,.5)}
   .vm-badge.st-stopped{color:var(--muted2)}
-  .vm-card-acts{display:flex;gap:4px}
-  .vm-card-acts button{background:rgba(255,154,60,.08);border:1px solid rgba(255,154,60,.25);
-    color:var(--acc2);border-radius:6px;width:26px;height:24px;display:inline-flex;align-items:center;
-    justify-content:center;cursor:pointer}
-  .vm-card-acts button svg{width:12px;height:12px}
-  .vm-card-acts button:hover{background:var(--acc-dim);box-shadow:var(--glow-acc)}
-  .vm-card-acts button.danger{color:var(--red);border-color:rgba(248,113,113,.35)}
   .vm-screen-col{min-width:0}
   .vm-screen-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
   .vm-screen-head span{font-size:12px;color:var(--muted2);font-family:var(--mono)}
@@ -688,12 +683,8 @@
   .gbtn{display:inline-flex;align-items:center;justify-content:center;gap:10px;background:#fff;color:#222;
     border-radius:9px;padding:11px 14px;font-size:14px;font-weight:600;text-decoration:none;margin-top:6px}
   .gbtn:hover{box-shadow:0 0 18px rgba(255,255,255,.25)}
-  .dev-auth{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-  .or-line{display:flex;align-items:center;gap:10px;color:var(--muted2);font-size:11px;font-family:var(--mono)}
-  .or-line::before,.or-line::after{content:'';flex:1;height:1px;background:rgba(255,154,60,.18)}
-  .dev-auth input,.cap-card input,.auth-card input{border:1px solid var(--border);background:var(--bg);
+  .cap-card input,.auth-card input{border:1px solid var(--border);background:var(--bg);
     color:var(--text);border-radius:9px;padding:10px 13px;font-size:13.5px;font-family:inherit}
-  .dev-auth .btn{margin-top:2px}
   .auth-err{color:var(--red);font-size:12px;text-align:center;min-height:16px}
   .cap-q{font-family:var(--mono);font-size:17px;text-align:center;padding:14px;border:1px dashed rgba(255,154,60,.35);
     border-radius:10px;color:var(--cream)}
@@ -760,26 +751,18 @@
       </div>
       <div class="msel-pop" id="modelPop"></div>
       <div class="cmdpop" id="cmdPop"></div>
-      <div id="foundryVm" style="display:none">
-        <div class="vm-toolbar">
-          <input id="vmName" placeholder="workstation-name" style="padding:6px 10px;background:#1c1917;border:1px solid #3f3a37;color:var(--fg);border-radius:8px;font-family:var(--mono)">
-          <select id="vmRes" style="padding:6px 10px;background:#1c1917;border:1px solid #3f3a37;color:var(--fg);border-radius:8px">
-            <option value="1280x720">1280x720</option>
-            <option value="1920x1080">1920x1080</option>
-            <option value="800x600">800x600</option>
-          </select>
-          <button class="vm-btn" id="vmCreateBtn"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg> Create (max 2)</button>
-          <button class="vm-btn ghost" id="vmRefreshBtn"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v5h-5"/></svg> Refresh</button>
-          <span class="vm-note" id="vmNote"></span>
+      <div id="vmWatch" style="display:none">
+        <div class="vw-head">
+          <span class="vw-ttl"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg> workstations</span>
+          <span class="vw-note">the agent drives these on its own — you just watch. click a session to see its screen live.</span>
         </div>
         <div class="vm-cols">
-          <div class="vm-list" id="vmList"><div class="vm-empty">no sessions — create one above</div></div>
+          <div class="vm-list" id="vmList"><div class="vm-empty">no sessions yet</div></div>
           <div class="vm-screen-col">
             <div class="vm-screen-head">
               <span id="vmScreenTitle">screen</span>
-              <a class="vm-btn ghost small" id="vmOpenLink" target="_blank" style="display:none">open viewer <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg></a>
             </div>
-            <div class="vm-screen" id="vmScreen"><span class="vm-empty">select a session to see its screen</span></div>
+            <div class="vm-screen" id="vmScreen"><span class="vm-empty">click a session to watch its screen</span></div>
           </div>
         </div>
       </div>
@@ -943,16 +926,11 @@
   <div class="auth-card">
     <div class="auth-brand"><span class="mark"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l7 7"/><path d="M4 4h6l10 10"/><path d="M11 11l9 9"/><path d="M20 4l-7 7"/></svg></span></div>
     <h2>Sign in to the Colosseum</h2>
-    <p class="auth-sub">Logins and chats are saved to your account. Sign in to keep building.</p>
+    <p class="auth-sub">Logins and chats are saved to your account. Sign in with Google to keep building.</p>
     <a class="gbtn" id="authGoogleBtn" href="/api/auth/google/start" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.1a6.6 6.6 0 0 1 0-4.2V7.06H2.18a11 11 0 0 0 0 9.88l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
       Sign in with Google
     </a>
-    <div class="dev-auth" id="devAuth">
-      <div class="or-line"><span>dev sign-in (owner password)</span></div>
-      <input type="password" id="authDevPass" placeholder="admin password" autocomplete="current-password">
-      <button class="btn" id="authDevBtn">Sign in</button>
-    </div>
     <div class="auth-err" id="authErr"></div>
   </div>
 </div>
@@ -1067,16 +1045,23 @@ function showCaptcha(cap){
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();go();}};
   });
 }
-function showAuthWall(){ME=null;$('#authWall').classList.add('show');}
+let AUTH_GOOGLE=false;
+function showAuthWall(){
+  ME=null;
+  const gb=$('#authGoogleBtn');
+  if(!AUTH_GOOGLE){gb.style.display='none';$('#authErr').textContent='Google sign-in is not configured on this server yet — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.';}
+  else gb.style.display='inline-flex';
+  $('#authWall').classList.add('show');
+}
 async function checkAuth(){
   try{
     const r=await fetch('/api/auth/me');
     if(!r.ok)throw 0;
     const m=await r.json();
+    AUTH_GOOGLE=!!m.google;
     ME=m.user;
     $('#authWall').classList.remove('show');
-    $('#authGoogleBtn').style.display=m.google?'inline-flex':'none';
-    $('#devAuth').style.display=m.google?'none':'block';
+    $('#authGoogleBtn').style.display=AUTH_GOOGLE?'inline-flex':'none';
     const chip=$('#userChip');
     chip.innerHTML=ico('user',13)+' <span>'+esc(ME.name||ME.email||'you')+'</span>';
     chip.style.display='flex';
@@ -1098,14 +1083,6 @@ $('#logoutBtn').onclick=async()=>{
   await fetch('/api/auth/logout',{method:'POST'});
   location.reload();
 };
-$('#authDevBtn').onclick=async()=>{
-  const pw=$('#authDevPass').value;if(!pw)return;
-  const r=await fetch('/api/auth/dev',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({password:pw})});
-  if(r.ok){checkAuth();}
-  else{$('#authErr').textContent='Wrong password.';$('#authDevPass').select();}
-};
-$('#authDevPass').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('#authDevBtn').click();}});
 checkAuth();
 function md(s){ // minimal markdown: code blocks + inline code + bold
   let out='',parts=s.split(/```/);
@@ -1140,24 +1117,25 @@ document.querySelectorAll('.side-nav button[data-page]').forEach(b=>b.onclick=()
 $('#navNew').onclick=()=>{curConv='';setFoundryUI(false);
   $('#msgs').innerHTML='';$('#chatHero').style.display='flex';$('#chatBody').style.display='none';
   $('#heroTitle').textContent='What would you like to do?';showPage('chat');renderConvs();closePreview();};
-let foundryMode=false;
+let foundryMode=false,vmPollTimer=null;
 function setFoundryUI(on){
   foundryMode=on;
   // Foundry is a frontier router — model selector + effort are dead
   const mb=$('#modeBtn'),ef=$('#topEffort');
   if(ef)ef.disabled=true;
-  const fv=$('#foundryVm');
+  const vw=$('#vmWatch');
   if(on){
     mb.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 5v10l-8 5-8-5V7z"/><path d="M12 8v8M8 10v4M16 10v4"/></svg> <span id="modeLabel">Foundry</span>';
     mb.style.pointerEvents='none';           // topbar selector dead in Foundry
     $('#modelPop').classList.remove('open'); // and close it if it was open
-    if(fv){fv.style.display='block';vmRefresh();}
+    if(vw){vw.style.display='block';vmWatchRefresh();}
   }else{
     mb.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg> <span id="modeLabel"></span> <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"/></svg>';
     mb.style.pointerEvents='auto';
     $('#modeLabel').textContent=curModel==='auto'?'Auto':((MODELS.find(m=>m.id===curModel)||{}).name||'Auto');
     refreshEffortSels();
-    if(fv)fv.style.display='none';
+    if(vw)vw.style.display='none';
+    clearInterval(vmPollTimer);vmPollTimer=null;
   }
 }
 $('#navFoundry').onclick=()=>{curConv='';setFoundryUI(true);
@@ -1949,7 +1927,7 @@ function cmdKey(e,inp){
 });
 document.addEventListener('click',e=>{if(!e.target.closest('#cmdPop')&&!e.target.closest('.composer'))hideCmdPop();});
 
-// ------- VM workstation panel
+// ------- VM workstation watcher (passive — the agent drives everything)
 let VMSESS=[],vmSel=null;
 async function vmApi(method,path,body){
   try{
@@ -1961,57 +1939,36 @@ async function vmApi(method,path,body){
     return j;
   }catch(e){toast('VM: '+e.message);throw e;}
 }
-async function vmRefresh(){
+function vmStatusIcon(st){
+  if(st==='running')return '<span class="vw-dot on"></span>running';
+  if(st==='paused')return '<span class="vw-dot pa"></span>paused';
+  if(st==='creating')return '<span class="vw-dot cr"></span>creating…';
+  return '<span class="vw-dot"></span>'+st;
+}
+async function vmWatchRefresh(){
   try{
     const j=await vmApi('GET','/sessions');
     VMSESS=j.sessions||[];
-    $('#vmNote').textContent=VMSESS.length+'/'+(j.max||2)+' sessions';
     const list=$('#vmList');
-    if(!VMSESS.length){list.innerHTML='<div class="vm-empty">no sessions — create one above</div>';vmSel=null;return;}
+    if(!VMSESS.length){list.innerHTML='<div class="vm-empty">no sessions yet — the agent will spin one up when it needs a desktop, and clean it up when done</div>';vmSel=null;$('#vmScreenTitle').textContent='screen';$('#vmScreen').innerHTML='<span class="vm-empty">click a session to watch its screen</span>';return;}
     list.innerHTML=VMSESS.map(s=>{
       const on=s.status==='running',sel=s.id===vmSel;
       return `<div class="vm-card${sel?' sel':''}${on?' on':''}" data-id="${s.id}">
         <div class="vm-card-top">
           <b>${s.name||s.id.slice(0,8)}</b>
-          <span class="vm-badge st-${s.status}">${s.status}</span>
+          <span class="vm-badge st-${s.status}">${vmStatusIcon(s.status)}</span>
         </div>
         <div class="vm-card-meta">${s.resolution||'?'} · ${(s.id||'').slice(0,8)}</div>
-        <div class="vm-card-acts">
-          <button data-act="start" title="start"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4l13 8-13 8z" fill="currentColor" stroke="none"/></svg></button>
-          <button data-act="stop" title="stop"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" fill="currentColor" stroke="none"/></svg></button>
-          <button data-act="pause" title="pause"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor" stroke="none"/></svg></button>
-          <button data-act="resume" title="resume"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 5l9 7-9 7z" fill="currentColor" stroke="none"/><path d="M17 5h2v14h-2z" fill="currentColor" stroke="none"/></svg></button>
-          <button data-act="restart" title="restart"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v5h-5"/></svg></button>
-          <button data-act="recover" title="recover"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5a4 4 0 0 0-5.4 5.4L3 17v4h4l6.1-6.1a4 4 0 0 0 5.4-5.4l-3.4 3.4-2.1-.6-.6-2.1z"/></svg></button>
-          <button data-act="connect" title="viewer link"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2"/></svg></button>
-          <button data-act="shot" title="screenshot"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7l2-3h4l2 3"/><circle cx="12" cy="13" r="3.5"/></svg></button>
-          <button data-act="delete" class="danger" title="delete"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-        </div>
       </div>`;
     }).join('');
     list.querySelectorAll('.vm-card').forEach(c=>{
-      c.onclick=e=>{if(e.target.closest('button'))return;vmSel=c.dataset.id;vmRefresh();};
-      c.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
-        const act=b.dataset.act,id=c.dataset.id;
-        if(act==='shot'){vmScreen(id);return;}
-        if(act==='connect'){
-          try{const j=await vmApi('POST','/sessions/'+id+'/connect');vmOpen(j.url||'');}catch(e){}
-          return;
-        }
-        if(act==='delete'){
-          if(!confirm('Delete this workstation?'))return;
-          try{await vmApi('DELETE','/sessions/'+id);if(vmSel===id)vmSel=null;vmRefresh();}catch(e){}
-          return;
-        }
-        try{await vmApi('POST','/sessions/'+id+'/'+act);vmRefresh();}catch(e){}
-      });
+      c.onclick=()=>{vmSel=c.dataset.id;vmWatchRefresh();vmScreen(vmSel);};
     });
+    if(vmSel&&!VMSESS.some(s=>s.id===vmSel)){vmSel=null;$('#vmScreenTitle').textContent='screen';$('#vmScreen').innerHTML='<span class="vm-empty">click a session to watch its screen</span>';}
+    if(vmSel&&VMSESS.find(s=>s.id===vmSel)?.status==='running'&&!vmPollTimer){
+      vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();vmScreen(vmSel);},15000);
+    }
   }catch(e){/* toast already shown */}
-}
-function vmOpen(url){
-  if(!url){toast('VM: no viewer link returned');return;}
-  const a=$('#vmOpenLink');a.href=url;a.style.display='inline-block';
-  toast('Viewer link ready — open it in a new tab');
 }
 async function vmScreen(id){
   const title=$('#vmScreenTitle');title.textContent='grabbing…';
@@ -2023,18 +1980,13 @@ async function vmScreen(id){
     $('#vmScreen').innerHTML='';
     const img=document.createElement('img');img.src=url;img.style.maxWidth='100%';img.style.borderRadius='8px';
     $('#vmScreen').appendChild(img);
-    title.textContent='screen · '+id.slice(0,8)+' (live grab)';
+    title.textContent='screen · '+id.slice(0,8)+' (live grab, refreshes)';
   }catch(e){
     title.textContent='screen';
     $('#vmScreen').innerHTML='<div class="vm-empty">'+e.message+'</div>';
-    if(e.message.includes('WebSocket')||e.message.includes('failed'))toast('VM screenshot needs outbound WebSockets — unavailable on Vercel. Use the viewer link instead.');
+    if(e.message.includes('WebSocket')||e.message.includes('failed'))toast('VM screenshot needs outbound WebSockets — unavailable on Vercel. The agent still works without it.');
   }
 }
-$('#vmCreateBtn').onclick=async()=>{
-  const name=$('#vmName').value.trim(),res=$('#vmRes').value;
-  try{await vmApi('POST','/sessions',{name:name||undefined,resolution:res});vmRefresh();$('#vmName').value='';}catch(e){}
-};
-$('#vmRefreshBtn').onclick=vmRefresh;
 </script>
 </body>
 </html>

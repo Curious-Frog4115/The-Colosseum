@@ -126,9 +126,19 @@ def _client():
     return _TC
 
 
-def _login():
-    """Dev-mode sign-in (Google not configured in tests) — the owner account."""
-    return _client().post("/api/auth/dev", json={"password": "ai4freeadmin"})
+def _login(admin=False):
+    """Sign in by injecting a signed session cookie through the real
+    Set-Cookie path (Google OAuth is only reachable with real credentials,
+    so tests mint the cookie directly)."""
+    import httpx
+    c = _client()
+    tok = main._sign({"sub": "tester", "email": "t@test",
+                      "name": "Tester", "admin": admin}, 3600)
+    req = httpx.Request("GET", "http://testserver/")
+    resp = httpx.Response(200, request=req, headers=httpx.Headers(
+        {"set-cookie": main._cookie("arena_sid", tok, 86400)}))
+    c.cookies.extract_cookies(resp)
+    return c
 
 
 def test_admin_unlock_flow():
@@ -145,25 +155,22 @@ def test_admin_unlock_flow():
     assert c.get("/api/admin/status").json()["unlocked"] is False
 
 
-def test_auth_gates_and_dev_login():
+def test_auth_gates_and_login():
     c = _client()
     assert c.get("/api/auth/me").status_code == 401
     assert c.post("/api/chat", json={"prompt": "hi", "model_id": "qwen35-397b",
                                      "conversation_id": ""}).status_code == 401
     assert c.get("/api/conversations").status_code == 401
-    assert c.post("/api/auth/dev", json={"password": "wrong"}).status_code == 403
-    r = _login()
-    assert r.status_code == 200 and r.json()["user"]["sub"] == "dev"
+    _login(admin=True)
     me = c.get("/api/auth/me").json()
-    assert me["user"]["admin"] is True and me["google"] is False
+    assert me["user"]["sub"] == "tester" and me["user"]["admin"] is True
     assert c.get("/api/conversations").status_code == 200
     assert c.post("/api/auth/logout").status_code == 200
     assert c.get("/api/auth/me").status_code == 401
 
 
 def test_direct_chat_gate():
-    c = _client()
-    _login()  # dev login is the admin account — frontier gate lifts
+    c = _login(admin=True)  # admin cookie lifts the frontier gate
     body = {"prompt": "hi", "model_id": "qwen35-397b", "conversation_id": ""}
     unlocked = c.post("/api/chat", json=body)
     assert unlocked.status_code == 200  # gate passes; stream not consumed here
@@ -171,8 +178,7 @@ def test_direct_chat_gate():
 
 
 def test_user_scoped_conversations():
-    c = _client()
-    _login()
+    c = _login()
     r = c.post("/api/conversations", json={"title": "scope test"})
     assert r.status_code == 200
     cid = r.json()["id"]
@@ -186,8 +192,7 @@ def test_user_scoped_conversations():
 
 
 def test_workspace_zip_and_download():
-    c = _client()
-    _login()
+    c = _login()
     main.tool_create_file({"name": "index.html", "content": "<h1>zip</h1>"}, CONV)
     main.tool_create_file({"name": "style.css", "content": "body{}"}, CONV)
     r = c.get(f"/api/canvas/{CONV}")
