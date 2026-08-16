@@ -3197,16 +3197,18 @@ def auth_login(req: DevLoginReq):
 @app.get("/api/auth/me")
 def auth_me(request: Request):
     u = user_from_request(request)
+    # vercel: serverless host — sessions/accounts/VMs are ephemeral there
+    vercel = os.environ.get("VERCEL", "") == "1"
     if not u:
         # 200 with user:null (not 401) so the browser console stays clean on
         # every page load; the body still tells the client whether Google
         # sign-in / admin password are configured so the wall renders right.
         return {"user": None, "google": bool(GOOGLE_CLIENT_ID),
-                "admin_set": bool(ADMIN_PASSWORD)}
+                "admin_set": bool(ADMIN_PASSWORD), "vercel": vercel}
     return {"user": {"sub": u["sub"], "email": u.get("email", ""),
                      "name": u.get("name", ""), "admin": bool(u.get("admin"))},
             "google": bool(GOOGLE_CLIENT_ID),
-            "admin_set": bool(ADMIN_PASSWORD)}
+            "admin_set": bool(ADMIN_PASSWORD), "vercel": vercel}
 
 
 # ============================================================ rate limiting

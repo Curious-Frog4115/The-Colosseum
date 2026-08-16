@@ -1320,6 +1320,7 @@ async function checkAuth(){
     const r=await fetch('/api/auth/me');
     const m=await r.json().catch(()=>({}));
     AUTH_GOOGLE=!!m.google;
+    VERCEL=!!m.vercel;
     if(!m.user){showAuthWall();return;}
     ME=m.user;
     $('#authWall').classList.remove('show');
@@ -1327,6 +1328,7 @@ async function checkAuth(){
     const chip=$('#userChip');
     chip.innerHTML=ico('user',13)+' <span>'+esc(ME.name||ME.email||'you')+'</span>';
     chip.style.display='flex';
+    if(VERCEL&&!sessionStorage.getItem('vercel_note')){sessionStorage.setItem('vercel_note','1');toast('Vercel demo mode — sessions/accounts are ephemeral here. Set the ARENA_SECRET env var, and run locally for VMs and stable accounts.',8000);}
     initApp();
   }catch(e){showAuthWall();}
 }
@@ -1409,7 +1411,7 @@ document.querySelectorAll('.side-nav button[data-page]').forEach(b=>b.onclick=()
 $('#navNew').onclick=()=>{curConv='';setFoundryUI(false);
   $('#msgs').innerHTML='';$('#chatHero').style.display='flex';$('#chatBody').style.display='none';
   $('#heroTitle').textContent='What would you like to do?';showPage('chat');renderConvs();closePreview();};
-let foundryMode=false,vmPollTimer=null;
+let foundryMode=false,vmPollTimer=null,VERCEL=false;
 function setFoundryUI(on){
   foundryMode=on;
   // Foundry is a frontier router — model selector + effort are dead
@@ -1420,7 +1422,7 @@ function setFoundryUI(on){
     mb.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 5v10l-8 5-8-5V7z"/><path d="M12 8v8M8 10v4M16 10v4"/></svg> <span id="modeLabel">Foundry</span>';
     mb.style.pointerEvents='none';           // topbar selector dead in Foundry
     $('#modelPop').classList.remove('open'); // and close it if it was open
-    if(vw){vw.style.display='block';vmWatchRefresh();if(!vmPollTimer)vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();},10000);}
+    if(vw){vw.style.display=VERCEL?'none':'block';if(!VERCEL){vmWatchRefresh();if(!vmPollTimer)vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();},10000);}}
   }else{
     mb.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg> <span id="modeLabel"></span> <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"/></svg>';
     mb.style.pointerEvents='auto';
@@ -1805,11 +1807,11 @@ async function sendChat(fromHero, goal, contPrompt, contModel){
           thinking+=(thinking?'\n':'')+ev.text;
           scheduleRender();break;
         case 'tool_call':upsertStep({id:ev.id,tool:ev.tool,label:ev.label,st:'running'});renderSteps();
-          if(ev.tool&&ev.tool.indexOf('vm_')===0)vmWatchRefresh();
+          if(!VERCEL&&ev.tool&&ev.tool.indexOf('vm_')===0)vmWatchRefresh();
           renderStatus(ev.label);break;
         case 'tool_result':upsertStep({id:ev.id,st:ev.status==='error'?'fail':'done',
           dur:ev.duration_ms,detail:ev.summary||''});renderSteps();
-          if(ev.tool&&ev.tool.indexOf('vm_')===0)vmWatchRefresh();break;
+          if(!VERCEL&&ev.tool&&ev.tool.indexOf('vm_')===0)vmWatchRefresh();break;
         case 'image':images.push({url:ev.url});scheduleRender();break;
         case 'skill':renderStatus('Loaded skill: '+ev.name);break;
         case 'ask_user':showAskCard(ev.question);break;
@@ -2371,6 +2373,7 @@ function vmStatusIcon(st){
   return '<span class="vw-dot"></span>'+st;
 }
 async function vmWatchRefresh(){
+  if(VERCEL)return;
   try{
     const j=await vmApi('GET','/sessions');
     VMSESS=j.sessions||[];
