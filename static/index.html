@@ -1056,9 +1056,9 @@ function showAuthWall(){
 async function checkAuth(){
   try{
     const r=await fetch('/api/auth/me');
-    if(!r.ok)throw 0;
-    const m=await r.json();
+    const m=await r.json().catch(()=>({}));
     AUTH_GOOGLE=!!m.google;
+    if(!r.ok){showAuthWall();return;}
     ME=m.user;
     $('#authWall').classList.remove('show');
     $('#authGoogleBtn').style.display=AUTH_GOOGLE?'inline-flex':'none';

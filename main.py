@@ -2959,7 +2959,10 @@ def auth_logout():
 def auth_me(request: Request):
     u = user_from_request(request)
     if not u:
-        raise HTTPException(401, "not logged in")
+        # 401 stays, but the body still tells the client whether Google
+        # sign-in is configured so the login wall can render correctly.
+        return JSONResponse({"user": None, "google": bool(GOOGLE_CLIENT_ID),
+                             "admin_set": bool(ADMIN_PASSWORD)}, status_code=401)
     return {"user": {"sub": u["sub"], "email": u.get("email", ""),
                      "name": u.get("name", ""), "admin": bool(u.get("admin"))},
             "google": bool(GOOGLE_CLIENT_ID),
