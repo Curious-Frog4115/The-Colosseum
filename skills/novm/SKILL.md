@@ -32,6 +32,10 @@ session if one exists.
 - NEVER claim success without seeing it on screen (`vm_see`).
 - If a session errors: `vm_recover` first, then `vm_restart`.
 - Session count is capped at 2 — stop or delete before creating more.
+- STATE PERSISTS: `vm_pause` / `vm_stop` keep the session and all its files on
+  disk — the desktop can be resumed later with `vm_start`. Sessions the user
+  closed when leaving the chat are paused, not deleted: prefer resuming an
+  existing paused/stopped session over creating a new one.
 - CLEAN UP: the human only watches — you own the whole lifecycle. The moment a
   session's task is done (or it is idle and unneeded), end it with `vm_delete`.
   Never leave sessions running after their job is finished; re-create on demand

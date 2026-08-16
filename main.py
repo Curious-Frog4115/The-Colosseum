@@ -19,6 +19,7 @@ import os
 import random
 import re
 import secrets
+import select
 import socket
 import ssl
 import sqlite3
@@ -38,7 +39,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1316,9 +1317,22 @@ async def _novm_base():
     raise RuntimeError("no NoVM backend reachable (set NOVM_BASE or check hosts)")
 
 
+_NOVM_SESSION_BASE = {}  # sid -> NoVM base that owns it (registries are per-instance)
+
+
 async def _novm(method, path, payload=None, timeout=90):
-    """One HTTP call to the NoVM API with rate-limit retry."""
+    """One HTTP call to the NoVM API with rate-limit retry.
+
+    Session-scoped calls stick to the base that created the session: the
+    backends keep process-local session registries, so a session only exists
+    on its own instance. If that instance lost it, fall back to the main base."""
     base = await _novm_base()
+    sid = None
+    m = re.match(r"^/api/sessions/([^/]+)", path)
+    if m:
+        sid = m.group(1)
+        if sid in _NOVM_SESSION_BASE:
+            base = _NOVM_SESSION_BASE[sid]
     last = None
     for att in range(4):
         try:
@@ -1332,6 +1346,10 @@ async def _novm(method, path, payload=None, timeout=90):
             txt = r.text
             if r.status_code == 429 or "rate exceeded" in txt.lower():
                 await asyncio.sleep(3 + att * 2)
+                continue
+            if sid and r.status_code in (404, 400) and base != _NOVM_OK_BASE:
+                base = _NOVM_OK_BASE
+                _NOVM_SESSION_BASE.pop(sid, None)
                 continue
             return r.status_code, txt
         except Exception as e:
@@ -1390,6 +1408,9 @@ async def tool_vm_create(args):
     if st != 201:
         return {"error": f"NoVM create failed ({st})", "raw": _novm_json(st, txt)}
     data = _novm_json(st, txt)
+    sid = data.get("id") if isinstance(data, dict) else None
+    if sid:
+        _NOVM_SESSION_BASE[sid] = await _novm_base()
     return {"created": True, "session": _novm_summary(data),
             "next": "call vm_start to boot the desktop, then vm_connect to open the viewer"}
 
@@ -1437,7 +1458,12 @@ async def tool_vm_delete(args):
         return {"error": "vm_delete requires an 'id' argument"}
     st, txt = await _novm("DELETE", f"/api/sessions/{sid}")
     if st in (200, 204):
+        _NOVM_SESSION_BASE.pop(sid, None)
         return {"deleted": sid}
+    if st in (404, 400) and "not found" in txt.lower():
+        # session already gone (its instance restarted) — treat as success
+        _NOVM_SESSION_BASE.pop(sid, None)
+        return {"deleted": sid, "already_gone": True}
     return {"error": f"NoVM delete failed ({st})", "raw": _novm_json(st, txt)}
 
 
@@ -4156,6 +4182,103 @@ async def vm_api_delete(sid: str, request: Request):
     if "error" in res:
         raise HTTPException(502, res["error"])
     return res
+
+
+@app.post("/api/vm/close-all")
+async def vm_api_close_all(request: Request):
+    """Close every workstation session (pause = stop processes, keep state on
+    disk) so nothing keeps running when the user leaves Foundry."""
+    require_user(request)
+    maybe_throttle(request)
+    st, data = await _novm_session_list()
+    if st != 200:
+        raise HTTPException(502, "NoVM list failed")
+    paused, skipped = [], []
+    for s in data or []:
+        status = s.get("status")
+        if status == "paused" or status == "stopped":
+            skipped.append({"id": s.get("id"), "status": status})
+            continue
+        if status in ("running", "starting", "error"):
+            res = await _vm_action({"id": s.get("id")}, "pause", "pause")
+            if "error" in res:
+                # starting/error sessions can't pause — stop them instead
+                res2 = await _vm_action({"id": s.get("id")}, "stop", "stop")
+                if "error" in res2:
+                    paused.append({"id": s.get("id"), "status": status,
+                                   "error": res2["error"]})
+                    continue
+            paused.append({"id": s.get("id"), "status": "paused",
+                           "note": "state saved on disk"})
+    return {"closed": paused, "already_closed": skipped,
+            "note": "sessions keep their files/state — vm_start resumes them"}
+
+
+@app.websocket("/api/vm/stream/{sid}")
+async def vm_stream_endpoint(ws: WebSocket, sid: str):
+    """Real-time bridge: browser <-> NoVM RFB-over-WebSocket. The page renders
+    a fluid live view of the desktop (raw framebuffer updates), no more
+    polled screenshots. Needs outbound WebSockets (self-host; degrades on Vercel)."""
+    if not user_from_request(ws):
+        await ws.close(code=1008)
+        return
+    maybe_throttle(ws)
+    await ws.accept()
+    vnc_sock = None
+    recv_task = None
+    try:
+        st, txt = await _novm("POST", f"/api/sessions/{sid}/connect")
+        data = _novm_json(st, txt)
+        token = data.get("token") if isinstance(data, dict) else None
+        if not token:
+            err = (data.get("error") or "") if isinstance(data, dict) else ""
+            if st == 404 or "not found" in err.lower():
+                reason = "this VM session no longer exists — the agent will create a new one"
+            else:
+                reason = "this VM is not running — the agent will start it when it needs it"
+            await ws.close(code=1011, reason=reason)
+            return
+        base = _NOVM_OK_BASE or NOVM_BASES[0]
+        host = base.split("://", 1)[1].split("/")[0]
+        vnc_ws = _NovmWS(host, 443, f"/api/vnc/connect/{token}", tls=True, timeout=30)
+        vnc_sock = vnc_ws.sock
+        # No select(): with TLS, several RFB frames can arrive inside one TLS
+        # record batch and sit buffered in the SSL object while the wire stays
+        # quiet. Poll with a short timeout instead so buffered data is drained.
+        vnc_sock.settimeout(0.05)
+        recv_task = asyncio.create_task(ws.receive_bytes())
+        while True:
+            # Client input first: starlette's receive() needs the event loop to
+            # run, so never spin on the VNC side without yielding.
+            if recv_task.done():
+                data = recv_task.result()
+                if not isinstance(data, bytes):
+                    break
+                vnc_ws.send_binary(data)
+                recv_task = asyncio.create_task(ws.receive_bytes())
+                continue
+            try:
+                opcode, payload = vnc_ws.recv_frame()
+                if opcode == 0x8:  # NoVM closed the VNC link
+                    break
+                await ws.send_bytes(payload)
+                continue
+            except socket.timeout:
+                pass
+            # Idle: yield so the rest of the server stays responsive.
+            await asyncio.sleep(0.01)
+            # Idle: yield so the rest of the server stays responsive.
+            await asyncio.sleep(0.01)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if recv_task is not None:
+            recv_task.cancel()
+        if vnc_sock is not None:
+            try:
+                vnc_sock.close()
+            except Exception:
+                pass
 
 
 static_dir = os.path.join(ROOT, "static")

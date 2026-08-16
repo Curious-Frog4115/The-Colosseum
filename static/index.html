@@ -658,6 +658,7 @@
   .vm-screen-head span{font-size:12px;color:var(--muted2);font-family:var(--mono)}
   .vm-screen{border:1px solid rgba(255,154,60,.16);border-radius:12px;min-height:280px;
     background:#0d0b0a;display:flex;align-items:center;justify-content:center;overflow:auto}
+  #vmCanvas{width:100%;height:auto;border-radius:8px;display:block;background:#000}
   .vm-empty{font-size:12px;color:var(--muted2);font-family:var(--mono);padding:20px;text-align:center}
 
   /* side user */
@@ -1106,6 +1107,7 @@ let MODELS=[],IMAGE_MODELS=[],curModel='auto',curConv='',convs=[],abortCtl=null;
 
 // ------- nav
 function showPage(p){
+  if(p!=='chat'&&foundryMode)setFoundryUI(false); // leaving Foundry closes VMs (state saved)
   document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.side-nav button').forEach(x=>x.classList.remove('active'));
   $('#page-'+p).classList.add('active');
@@ -1136,6 +1138,7 @@ function setFoundryUI(on){
     refreshEffortSels();
     if(vw)vw.style.display='none';
     clearInterval(vmPollTimer);vmPollTimer=null;
+    vmCloseAll(); // leaving Foundry closes all VMs (state saved, resumable)
   }
 }
 $('#navFoundry').onclick=()=>{curConv='';setFoundryUI(true);
@@ -1966,27 +1969,120 @@ async function vmWatchRefresh(){
     });
     if(vmSel&&!VMSESS.some(s=>s.id===vmSel)){vmSel=null;$('#vmScreenTitle').textContent='screen';$('#vmScreen').innerHTML='<span class="vm-empty">click a session to watch its screen</span>';}
     if(vmSel&&VMSESS.find(s=>s.id===vmSel)?.status==='running'&&!vmPollTimer){
-      vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();vmScreen(vmSel);},15000);
+      vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();},15000);
     }
   }catch(e){/* toast already shown */}
 }
-async function vmScreen(id){
-  const title=$('#vmScreenTitle');title.textContent='grabbing…';
-  $('#vmScreen').innerHTML='<div class="vm-empty">capturing the desktop (10–20s)…</div>';
-  try{
-    const r=await apiFetch('/api/vm/screenshot/'+id);
-    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||('HTTP '+r.status));}
-    const url=URL.createObjectURL(await r.blob());
-    $('#vmScreen').innerHTML='';
-    const img=document.createElement('img');img.src=url;img.style.maxWidth='100%';img.style.borderRadius='8px';
-    $('#vmScreen').appendChild(img);
-    title.textContent='screen · '+id.slice(0,8)+' (live grab, refreshes)';
-  }catch(e){
-    title.textContent='screen';
-    $('#vmScreen').innerHTML='<div class="vm-empty">'+e.message+'</div>';
-    if(e.message.includes('WebSocket')||e.message.includes('failed'))toast('VM screenshot needs outbound WebSockets — unavailable on Vercel. The agent still works without it.');
-  }
+// ---- live RFB viewer (fluid video of the VM desktop) ---------------------
+let vmRfb=null,vmRfbTries=0;
+function vmStopView(){
+  if(vmRfb){try{vmRfb.close();}catch(e){}vmRfb=null;}
+  vmRfbTries=0;
 }
+function vmScreen(id){
+  vmStopView();
+  const title=$('#vmScreenTitle');
+  const sess=VMSESS.find(s=>s.id===id);
+  if(!sess){title.textContent='screen';$('#vmScreen').innerHTML='<span class="vm-empty">session gone</span>';return;}
+  if(sess.status!=='running'){
+    title.textContent='screen · '+id.slice(0,8);
+    $('#vmScreen').innerHTML='<span class="vm-empty">'+sess.status+' — state is saved, it resumes when the agent needs it</span>';
+    return;
+  }
+  const box=$('#vmScreen');
+  const cv=document.createElement('canvas');
+  cv.id='vmCanvas';
+  box.innerHTML='';
+  box.appendChild(cv);
+  title.textContent='screen · '+id.slice(0,8)+' · live';
+  const ctx=cv.getContext('2d');
+  const proto=location.protocol==='https:'?'wss://':'ws://';
+  let buf=new Uint8Array(0),W=0,H=0,phase=0,err=false;
+  const concat=(a,b)=>{const c=new Uint8Array(a.length+b.length);c.set(a);c.set(b,a.length);return c;};
+  const open=()=>{
+    if(vmRfbTries>=10){title.textContent='screen';box.innerHTML='<span class="vm-empty">stream failed — the viewer link in the agent log still works</span>';return;}
+    vmRfbTries++;
+    const ws=new WebSocket(proto+location.host+'/api/vm/stream/'+id);
+    vmRfb=ws;ws.binaryType='arraybuffer';
+    ws.onopen=()=>{ws.send(new Uint8Array([0x52,0x46,0x42,0x20,0x30,0x30,0x33,0x2e,0x30,0x30,0x38,0x0a]));}; // "RFB 003.008\n"
+    ws.onmessage=e=>{
+      const d=new Uint8Array(e.data);
+      buf=concat(buf,d);
+      while(true){
+        if(phase===0){ // server version echo (12)
+          if(buf.length<12)break;buf=buf.slice(12);
+          ws.send(new Uint8Array([1]));phase=1;
+        }else if(phase===1){ // security types: 1 byte count + list
+          if(buf.length<1)break;
+          const n=buf[0];buf=buf.slice(1);
+          if(buf.length<n)break;buf=buf.slice(n);
+          ws.send(new Uint8Array([1]));phase=2; // choose None
+        }else if(phase===2){ // security result (4)
+          if(buf.length<4)break;buf=buf.slice(4);
+          ws.send(new Uint8Array([1]));phase=3; // shared
+        }else if(phase===3){ // server init: 24 + name len
+          if(buf.length<24)break;
+          W=(buf[0]<<8)|buf[1];H=(buf[2]<<8)|buf[3];
+          const nl=(buf[20]<<24)|(buf[21]<<16)|(buf[22]<<8)|buf[23];
+          buf=buf.slice(24);
+          if(buf.length<nl)break;buf=buf.slice(nl);
+          cv.width=W;cv.height=H;
+          ws.send(new Uint8Array([2,0,0,1,0,0,0,0])); // SetEncodings: Raw only
+          ws.send(new Uint8Array([3,1,0,0,0,0,(W>>8)&255,W&255,(H>>8)&255,H&255])); // full update
+          phase=4;
+        }else if(phase===4){ // framebuffer updates
+          if(buf.length<4)break;
+          const mtype=buf[0];
+          if(mtype===0){ // FramebufferUpdate
+            const nrect=(buf[2]<<8)|buf[3];
+            buf=buf.slice(4);
+            let ok=true;
+            for(let i=0;i<nrect&&ok;i++){
+              if(buf.length<12){ok=false;break;}
+              const rx=(buf[0]<<8)|buf[1],ry=(buf[2]<<8)|buf[3];
+              const rw=(buf[4]<<8)|buf[5],rh=(buf[6]<<8)|buf[7];
+              const enc=(buf[8]<<24)|(buf[9]<<16)|(buf[10]<<8)|buf[11];
+              buf=buf.slice(12);
+              if(enc===0){ // Raw
+                const need=rw*rh*4;
+                if(buf.length<need){ok=false;break;}
+                const img=ctx.createImageData(rw,rh);
+                for(let p=0;p<rw*rh;p++){
+                  img.data[p*4]=buf[p*4+2];img.data[p*4+1]=buf[p*4+1];
+                  img.data[p*4+2]=buf[p*4];img.data[p*4+3]=255;
+                }
+                ctx.putImageData(img,rx,ry);
+                buf=buf.slice(need);
+              }else if(enc>=0){ // other encoding we didn't ask for — skip unknown bytes impossible; drop stream
+                ok=false;
+              }
+            }
+            if(!ok)break;
+            // request the next incremental update
+            ws.send(new Uint8Array([3,1,0,0,0,0,(W>>8)&255,W&255,(H>>8)&255,H&255]));
+          }else{ // Bell / cut-text etc — skip safely: drop and re-sync on next frame
+            break;
+          }
+        }else break;
+      }
+    };
+    ws.onerror=()=>{};
+    ws.onclose=e=>{
+      if(vmRfb===ws)vmRfb=null;
+      if(!foundryMode)return;
+      const sess=VMSESS.find(s=>s.id===id);
+      if(sess&&sess.status!=='running'){title.textContent='screen · '+id.slice(0,8);box.innerHTML='<span class="vm-empty">'+sess.status+' — state is saved, it resumes when the agent needs it</span>';return;}
+      if(e.reason&&e.reason!==''){title.textContent='screen';box.innerHTML='<span class="vm-empty">'+esc(e.reason)+'</span>';return;}
+      setTimeout(()=>{if(foundryMode&&vmSel===id)open();},3000);
+    };
+  };
+  open();
+}
+function vmCloseAll(){
+  vmStopView();
+  fetch('/api/vm/close-all',{method:'POST'}).catch(()=>{});
+}
+window.addEventListener('pagehide',()=>{if(foundryMode)navigator.sendBeacon('/api/vm/close-all');});
 </script>
 </body>
 </html>

@@ -212,6 +212,38 @@ def test_workspace_zip_and_download():
     assert "attachment" not in plain.headers.get("content-disposition", "")
 
 
+def test_vm_close_all():
+    c = _login()
+    assert c.get("/api/vm/sessions").status_code == 200
+    r = c.post("/api/vm/close-all")
+    assert r.status_code == 200
+    d = r.json()
+    assert "closed" in d and "already_closed" in d
+    # unauthenticated
+    c.post("/api/auth/logout")
+    assert c.post("/api/vm/close-all").status_code == 401
+
+
+def test_vm_stream_gate():
+    from starlette.websockets import WebSocketDisconnect
+    c = _client()
+    # logged-out websocket is rejected (closed before accept)
+    try:
+        with c.websocket_connect("/api/vm/stream/nonexistent") as ws:
+            ws.receive_bytes()
+        raise AssertionError("expected closure (anon)")
+    except WebSocketDisconnect:
+        pass
+    # logged-in, nonexistent session: connect fails -> server closes
+    c = _login()
+    try:
+        with c.websocket_connect("/api/vm/stream/nonexistent") as ws:
+            ws.receive_bytes()
+        raise AssertionError("expected closure (bad session)")
+    except WebSocketDisconnect:
+        pass
+
+
 def _run_all():
     import re
     tests = [(n, f) for n, f in sorted(globals().items())
