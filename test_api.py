@@ -157,7 +157,8 @@ def test_admin_unlock_flow():
 
 def test_auth_gates_and_login():
     c = _client()
-    assert c.get("/api/auth/me").status_code == 401
+    assert c.get("/api/auth/me").status_code == 200
+    assert c.get("/api/auth/me").json()["user"] is None
     assert c.post("/api/chat", json={"prompt": "hi", "model_id": "qwen35-397b",
                                      "conversation_id": ""}).status_code == 401
     assert c.get("/api/conversations").status_code == 401
@@ -166,7 +167,16 @@ def test_auth_gates_and_login():
     assert me["user"]["sub"] == "tester" and me["user"]["admin"] is True
     assert c.get("/api/conversations").status_code == 200
     assert c.post("/api/auth/logout").status_code == 200
-    assert c.get("/api/auth/me").status_code == 401
+    assert c.get("/api/auth/me").json()["user"] is None
+
+
+def test_dev_login():
+    c = _client()
+    assert c.post("/api/auth/dev", json={"password": "nope"}).status_code == 403
+    ok = c.post("/api/auth/dev", json={"password": "ai4freeadmin"})
+    assert ok.status_code == 200 and ok.json()["user"]["admin"] is True
+    me = c.get("/api/auth/me").json()
+    assert me["user"]["sub"] == "dev" and me["user"]["admin"] is True
 
 
 def test_direct_chat_gate():

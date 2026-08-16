@@ -2982,14 +2982,32 @@ def auth_logout():
     return r
 
 
+class DevLoginReq(BaseModel):
+    password: str = ""
+
+
+@app.post("/api/auth/dev")
+def auth_dev(req: DevLoginReq):
+    """Dev-mode password sign-in: only reachable while Google OAuth is NOT
+    configured. Keeps the self-host usable without Google credentials."""
+    if GOOGLE_CLIENT_ID:
+        raise HTTPException(400, "google sign-in is configured — use it")
+    if not ADMIN_PASSWORD:
+        raise HTTPException(501, "no admin password set — set ADMIN_PASSWORD or GOOGLE_CLIENT_ID")
+    if not hmac.compare_digest(req.password or "", ADMIN_PASSWORD):
+        raise HTTPException(403, "wrong password")
+    return _make_auth_response({"sub": "dev", "email": "", "name": "owner", "admin": True})
+
+
 @app.get("/api/auth/me")
 def auth_me(request: Request):
     u = user_from_request(request)
     if not u:
-        # 401 stays, but the body still tells the client whether Google
-        # sign-in is configured so the login wall can render correctly.
-        return JSONResponse({"user": None, "google": bool(GOOGLE_CLIENT_ID),
-                             "admin_set": bool(ADMIN_PASSWORD)}, status_code=401)
+        # 200 with user:null (not 401) so the browser console stays clean on
+        # every page load; the body still tells the client whether Google
+        # sign-in / admin password are configured so the wall renders right.
+        return {"user": None, "google": bool(GOOGLE_CLIENT_ID),
+                "admin_set": bool(ADMIN_PASSWORD)}
     return {"user": {"sub": u["sub"], "email": u.get("email", ""),
                      "name": u.get("name", ""), "admin": bool(u.get("admin"))},
             "google": bool(GOOGLE_CLIENT_ID),
