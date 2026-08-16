@@ -15,6 +15,7 @@ import base64 as b64
 import datetime
 import hashlib
 import hmac
+import io
 import json
 import os
 import random
@@ -34,6 +35,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 import zlib
 from base64 import b64encode
 from contextlib import asynccontextmanager
@@ -93,6 +95,7 @@ PROVIDER_URLS = {
 }
 POLLIN_IMG = "https://image.pollinations.ai/prompt/"
 OVH_IMG = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/images/generations"
+LOGFARE_IMG = "https://logfare.ai/v1/images/generations"
 
 BAZAAR_KEY_FILE = os.path.join(ROOT, ".bazaar_key")
 BAZAAR_KEY = ""
@@ -212,9 +215,8 @@ CATALOG = [
      [(OVH, "Meta-Llama-3_3-70B-Instruct", 1)]),
     ("deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek", "frontier", "128K",
      [(BAZAAR, "deepseek/deepseek-v4-flash:free", 1),
-      (LOGFARE, "deepseek-v4-flash", 2),
-      (OPENCODE, "deepseek-v4-flash-free", 3),
-      (FREEROUTER, "deepseek-v4-flash", 4)]),
+      (LOGFARE, "deepseek-v4-flash-0731", 2),
+      (OPENCODE, "deepseek-v4-flash-free", 3)]),
     ("qwen37-flash", "Qwen 3.7 Flash", "Alibaba", "frontier", "128K",
      [(BAZAAR, "qwen/qwen3.7-flash:free", 1)]),
     ("gemini-31-flash-lite", "Gemini 3.1 Flash Lite", "Google", "fast", "1M",
@@ -265,7 +267,8 @@ CATALOG = [
     # reliably up (kiro-auto, minimax-m3, grape-2-pro); the rest are marked
     # with fallback chains so battles/chat never die when logfare is down.
     ("kiro-auto", "Anonymous-Kiro-Auto", "Unknown (router)", "frontier", "?",
-     [(LOGFARE, "kiro-auto", 1)]),
+     [(LOGFARE, "kiro-auto", 1),
+      (FREEROUTER, "kiro-auto", 2)]),
     ("minimax-m3", "MiniMax M3", "MiniMax", "frontier", "128K",
      [(LOGFARE, "minimax-m3", 1)]),
     ("grape-2-pro", "GRaPE 2 Pro", "Logfare", "reasoning", "128K",
@@ -274,23 +277,17 @@ CATALOG = [
      [(LOGFARE, "glm-5.2", 1)]),
     ("kimi-k3", "Kimi K3", "Moonshot AI", "frontier", "256K",
      [(LOGFARE, "kimi-k3", 1)]),
-    ("kimi-k27-code", "Kimi K2.7 Code", "Moonshot AI", "coding", "256K",
-     [(LOGFARE, "kimi-k2.7-code", 1)]),
-    ("deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek", "frontier", "128K",
-     [(LOGFARE, "deepseek-v4-pro", 1),
-      (FREEROUTER, "deepseek-v4-pro", 2)]),
-    ("qwen38-max", "Qwen 3.8 Max", "Alibaba", "frontier", "256K",
-     [(LOGFARE, "qwen-3.8-max", 1),
-      (FREEROUTER, "qwen3.8-max", 2)]),
+("deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek", "frontier", "128K",
+     [(LOGFARE, "deepseek-v4-pro", 1)]),
+    ("qwen-38-27b", "Qwen 3.8 27B", "Alibaba", "general", "131K",
+     [(LOGFARE, "qwen-3.8-27b", 1)]),
     # --- freerouter.eu.cc keyless catalog: probed live this session ---
-    ("fr-qwen38-27b", "Qwen 3.8 27B (FreeRouter)", "Alibaba", "general", "131K",
-     [(FREEROUTER, "qwen-3.8-27b", 1)]),
     ("flashy-v2", "Flashy V2 Preview", "Router", "fast", "128K",
      [(FREEROUTER, "flashy-v2", 1)]),
     ("flashy-v1", "Flashy V1", "Router", "fast", "128K",
      [(FREEROUTER, "flashy-v1", 1)]),
-    ("qwen36-35b", "Qwen 3.6 35B A3B", "Alibaba", "general", "131K",
-     [(LOGFARE, "qwen-3.6-35b-a3b", 1)]),
+    ("lynx-router", "Lynx Router", "Router", "general", "131K",
+     [(FREEROUTER, "lynx-router", 1)]),
     # inferera.com (AIHubMix mirror) — user key, FREE-tier models only.
     # Free tier is currently paywalled ("prevent abuse") — keep as last-resort
     # routes with fallback chains to keyless providers.
@@ -339,6 +336,7 @@ CATALOG = [
 MODELS = [{"id": i, "name": n, "org": o, "category": c, "ctx": x, "routes": r}
           for i, n, o, c, x, r in CATALOG]
 MODEL_MAP = {m["id"]: m for m in MODELS}
+VISION_MODELS = {m["id"] for m in MODELS if m["category"] == "vision"}
 
 # ============================================================ fallback chains
 # Cross-model fallback: when every provider route for a canonical model fails,
@@ -351,11 +349,8 @@ FALLBACK_CHAINS = {
                "nemotron-3-ultra"],
     "kimi-k3": ["kiro-auto", "minimax-m3", "deepseek-v4-flash", "qwen37-flash",
                 "nemotron-3-ultra"],
-    "kimi-k27-code": ["codestral", "qwen3-coder-30b", "laguna-s-21", "north-mini-code"],
     "deepseek-v4-pro": ["deepseek-v4-flash", "kiro-auto", "minimax-m3", "qwen37-flash"],
-    "qwen38-max": ["qwen37-flash", "kiro-auto", "minimax-m3", "deepseek-v4-flash",
-                   "nemotron-3-ultra"],
-    "qwen36-35b": ["qwen36-27b", "hunyuan-3", "minimax-m27"],
+    "qwen-38-27b": ["qwen37-flash", "hunyuan-3", "minimax-m27"],
     "grape-2-pro": ["qwen3-32b", "deepseek-v4-flash", "nemotron-3-nano-omni"],
     # inferera free tier is paywalled right now -> keyless fallbacks
     "gemini-36-flash": ["gemini-31-flash-lite", "step-37-flash", "qwen37-flash",
@@ -450,6 +445,8 @@ IMAGE_MODELS = [
      "routes": [("pollin", "realism", 1)]},
     {"id": "img-sdxl", "name": "Stable Diffusion XL", "org": "Stability AI", "category": "image",
      "routes": [("ovh", "stable-diffusion-xl-base-v10", 1)]},
+    {"id": "img-flux2-pro", "name": "Flux 2 Pro", "org": "LogFare", "category": "image",
+     "routes": [("logfare", "flux-2-pro", 1)]},
 ]
 IMAGE_MAP = {m["id"]: m for m in IMAGE_MODELS}
 
@@ -646,6 +643,20 @@ PROVIDER_ERR = re.compile(
     r"|insufficient balance", re.I)
 
 
+# Cut-off detection: a stream that ends early, or a model that finishes its
+# turn while admitting it was cut off, gets auto-continued by the SAME model
+# in the same stream so the reply looks seamless.
+CONTINUE_PROBE = re.compile(
+    r"(cut\s*off|didn'?t\s+finish|not\s+finished|incomplete|interrupted|truncated|"
+    r"ran\s+out|token\s*limit|hit\s+(the|a)\s+(limit|cap)|out\s+of\s+(tokens|time)|"
+    r"i\s*'?m?\s*(going\s*to|will)\s+continue|\[(cut\s*off|truncated|incomplete|"
+    r"interrupted|response\s*cut)\]|\.\.\.(\.)?$)", re.I)
+
+CONTINUE_MSG = ("The previous response was cut off mid-generation. Continue it EXACTLY "
+                "from where it stopped — no preamble, no repetition, no summary, no "
+                "apologies. Produce only the missing continuation of the same response.")
+
+
 async def stream_canonical(model_id, messages, temp=0.7, max_tokens=900, tools=None,
                           reasoning_effort="", allow_cross_fallback=True, served=None):
     """Stream from a canonical model, walking its provider routes in
@@ -694,86 +705,121 @@ async def stream_canonical(model_id, messages, temp=0.7, max_tokens=900, tools=N
                 sent_tools = 0
                 head = ""          # held-back opening text, checked for provider errors
                 head_done = False
-                try:
-                    async for ekind, eval_ in sse_chunks(PROVIDER_URLS[provider],
-                                                         provider_headers(provider), payload):
-                        if ekind == "tool":
-                            if not got:
-                                got = True
-                                yield ("meta", provider)
-                            emitted = True
-                            yield ("tool_delta", eval_)
-                            continue
-                        if ekind == "reason":
-                            if not got:
-                                got = True
-                                yield ("meta", provider)
-                            yield ("reason_delta", eval_)
-                            continue
-                        clean = norm.feed(eval_)
-                        if clean:
-                            if not head_done:
-                                head += clean
-                                if PROVIDER_ERR.search(head):
-                                    raise RuntimeError("provider quota/billing error in body")
-                                if len(head) > 300:
-                                    head_done = True
+                acc = ""           # accumulated user text (for cut-off resume)
+                had_tools = False
+                conts = 0          # continuation attempts on this route
+                run_msgs = messages
+                while True:
+                    try:
+                        async for ekind, eval_ in sse_chunks(PROVIDER_URLS[provider],
+                                                             provider_headers(provider),
+                                                             payload):
+                            if ekind == "tool":
+                                had_tools = True
+                                if not got:
+                                    got = True
+                                    yield ("meta", provider)
+                                emitted = True
+                                yield ("tool_delta", eval_)
+                                continue
+                            if ekind == "reason":
+                                if not got:
+                                    got = True
+                                    yield ("meta", provider)
+                                yield ("reason_delta", eval_)
+                                continue
+                            clean = norm.feed(eval_)
+                            if clean:
+                                acc = (acc + clean)[-6000:]
+                                if not head_done:
+                                    head += clean
+                                    if PROVIDER_ERR.search(head):
+                                        raise RuntimeError("provider quota/billing error in body")
+                                    if len(head) > 300:
+                                        head_done = True
+                                        emitted = True
+                                        if not got:
+                                            got = True
+                                            yield ("meta", provider)
+                                        yield ("chunk", head)
+                                        head = ""
+                                else:
                                     emitted = True
                                     if not got:
                                         got = True
                                         yield ("meta", provider)
-                                    yield ("chunk", head)
-                                    head = ""
-                            else:
+                                    yield ("chunk", clean)
+                            # protocol blocks captured mid-stream -> structured events
+                            while sent_tools < len(norm.tool_blocks):
                                 emitted = True
-                                if not got:
-                                    got = True
-                                    yield ("meta", provider)
-                                yield ("chunk", clean)
-                        # protocol blocks captured mid-stream -> structured events
-                        while sent_tools < len(norm.tool_blocks):
-                            emitted = True
-                            yield ("tool_protocol", norm.tool_blocks[sent_tools])
-                            sent_tools += 1
-                    # flush any held head + normalizer tail
-                    tail = head + norm.flush()
-                    if tail and PROVIDER_ERR.search(tail):
-                        raise RuntimeError("provider quota/billing error in body")
-                    if tail or norm.tool_blocks or emitted:
-                        if not got:
-                            got = True
-                            yield ("meta", provider)
-                        if tail:
-                            emitted = True
-                            yield ("chunk", tail)
-                        while sent_tools < len(norm.tool_blocks):
-                            emitted = True
-                            yield ("tool_protocol", norm.tool_blocks[sent_tools])
-                            sent_tools += 1
-                        if not emitted:
-                            raise RuntimeError("empty stream")
-                        ms = (time.time() - t0) * 1000
-                        HEALTH.success(provider, upstream, ms)
-                        log_route(provider, upstream, True, ms)
-                        return
-                    raise RuntimeError("empty stream")
-                except StreamEndedEarly as e:
-                    last_err = e
-                    if emitted:  # partial content already emitted — retry elsewhere
+                                yield ("tool_protocol", norm.tool_blocks[sent_tools])
+                                sent_tools += 1
+                        # flush any held head + normalizer tail
+                        tail = head + norm.flush()
+                        if tail and PROVIDER_ERR.search(tail):
+                            raise RuntimeError("provider quota/billing error in body")
+                        if tail or norm.tool_blocks or emitted:
+                            if not got:
+                                got = True
+                                yield ("meta", provider)
+                            if tail:
+                                emitted = True
+                                yield ("chunk", tail)
+                            while sent_tools < len(norm.tool_blocks):
+                                emitted = True
+                                yield ("tool_protocol", norm.tool_blocks[sent_tools])
+                                sent_tools += 1
+                            if not emitted:
+                                raise RuntimeError("empty stream")
+                            ms = (time.time() - t0) * 1000
+                            HEALTH.success(provider, upstream, ms)
+                            log_route(provider, upstream, True, ms)
+                            # model finished its turn but admits it was cut off
+                            if conts < 2 and not had_tools and CONTINUE_PROBE.search(acc[-300:]):
+                                run_msgs = (run_msgs +
+                                            [{"role": "assistant", "content": acc[-2000:]},
+                                             {"role": "user", "content": CONTINUE_MSG}])
+                                payload = dict(payload, messages=run_msgs)
+                                conts += 1
+                                emitted = False
+                                got = False
+                                norm = StreamNormalizer()
+                                sent_tools = 0
+                                head = ""
+                                head_done = False
+                                continue
+                            return
+                        raise RuntimeError("empty stream")
+                    except StreamEndedEarly as e:
+                        last_err = e
+                        if not emitted or had_tools or conts >= 2:
+                            # partial content already emitted — retry elsewhere
+                            HEALTH.failure(provider, upstream)
+                            log_route(provider, upstream, False, (time.time() - t0) * 1000)
+                            raise
+                        # stream cut off mid-turn — resume the SAME model from the
+                        # last word so the reply looks seamless to the user
+                        run_msgs = (run_msgs +
+                                    [{"role": "assistant", "content": acc[-2000:] or "(partial)"},
+                                     {"role": "user", "content": CONTINUE_MSG}])
+                        payload = dict(payload, messages=run_msgs)
+                        conts += 1
+                        emitted = False
+                        got = False
+                        norm = StreamNormalizer()
+                        sent_tools = 0
+                        head = ""
+                        head_done = False
+                        continue
+                    except Exception as e:
+                        last_err = e
+                        if emitted:  # partial stream then died — return what we had
+                            HEALTH.failure(provider, upstream)
+                            return
                         HEALTH.failure(provider, upstream)
                         log_route(provider, upstream, False, (time.time() - t0) * 1000)
-                        raise
-                    HEALTH.failure(provider, upstream)
-                    log_route(provider, upstream, False, (time.time() - t0) * 1000)
-                    raise
-                except Exception as e:
-                    last_err = e
-                    if emitted:  # partial stream then died — return what we had
-                        HEALTH.failure(provider, upstream)
-                        return
-                    HEALTH.failure(provider, upstream)
-                    log_route(provider, upstream, False, (time.time() - t0) * 1000)
-            await asyncio.sleep(1.0 + rnd * 1.5)
+                        break
+                await asyncio.sleep(1.0 + rnd * 1.5)
     raise RuntimeError(f"all providers failed: {last_err}")
 
 
@@ -1780,7 +1826,10 @@ def _novm_grab(vnc):
     return b64encode(_png_encode(vnc.w, vnc.h, bytes(rgb))).decode()
 
 
-async def tool_vm_screenshot(args):
+async def tool_vm_screenshot(args, parent_model=None):
+    """Capture the VM screen. A vision model ALWAYS describes it in text so
+    any agent (vision or not) can read the screen; vision-capable agents
+    additionally get the raw image."""
     sid = str(args.get("id") or args.get("session") or "").strip()
     if not sid:
         return {"error": "vm_screenshot requires an 'id' argument"}
@@ -1793,8 +1842,20 @@ async def tool_vm_screenshot(args):
     except Exception as e:
         return {"error": f"vm_screenshot failed: {e}",
                 "hint": "works on self-host; on Vercel outbound WebSockets are unavailable — use vm_connect to view it manually"}
-    return {"image": png_b64, "width": w, "height": h,
-            "view": "/api/vm/screenshot/" + sid}
+    try:
+        desc = await _vision_describe(png_b64,
+            "You are the eyes of an autonomous agent. Describe this computer screen in "
+            "perfect detail: every window, all visible text (quote terminal prompts and "
+            "commands verbatim), UI elements, and their on-screen positions. Be precise "
+            "and factual — the agent will act on this description.")
+    except Exception:
+        desc = ""
+    out = {"description": desc, "width": w, "height": h,
+           "view": "/api/vm/screenshot/" + sid,
+           "note": "a vision model described the screen above — act on the description"}
+    if parent_model in VISION_MODELS:
+        out["image"] = png_b64
+    return out
 
 
 async def _vision_describe(png_b64, prompt="Describe what is on this computer screen in detail."):
@@ -2023,7 +2084,7 @@ Tools:
 - vm_files {id, path?}: list files in the VM home directory
 - vm_upload {id, path, content}: write a text file into the VM home
 - vm_download {id, path}: read a file from the VM home
-- vm_screenshot {id}: capture the VM screen as an image and return its view link
+- vm_screenshot {id}: capture the VM screen — a vision model automatically describes it in text, so ANY model can read the screen (your eyes); act on the description
 - vm_see {id}: capture the screen AND describe it with a vision model (your eyes on the VM)
 - vm_key {id, keys}: type text into the focused window (\\n is Enter)
 - vm_click {id, x, y, button?}: click at pixel coordinates on the VM screen (button 1 left, 2 middle, 3 right)
@@ -2066,7 +2127,25 @@ AGENT_SYS = (
     "your work, then CLEAN UP: when a VM session is no longer needed, end it with vm_delete "
     "so no idle sessions are left running." + TOOL_DESCRIPTIONS)
 
-TOOL_RE = re.compile(r'^\s*\{.*"tool"\s*:.*\}\s*$', re.S)
+TOOL_RE = re.compile(r'^\s*\{.*("tool"|"name"|"function")\s*:.*\}\s*$', re.S)
+
+
+def _lenient_json(s):
+    """JSON.parse with tolerance for trailing commas and surrounding prose."""
+    if not s:
+        return None
+    s = s.strip()
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+    try:
+        return json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, re.S)
+        if m:
+            try:
+                return json.loads(re.sub(r",\s*([}\]])", r"\1", m.group(0)))
+            except Exception:
+                return None
+    return None
 
 # native OpenAI tool schema — models that support real tool_calls use these;
 # the JSON-line protocol above stays as fallback for models that don't.
@@ -2373,7 +2452,7 @@ async def run_tool(name, args, conv_id, parent_model=None, budget=None):
     if name == "vm_download":
         return await tool_vm_download(args)
     if name == "vm_screenshot":
-        return await tool_vm_screenshot(args)
+        return await tool_vm_screenshot(args, parent_model)
     if name == "vm_see":
         return await tool_vm_see(args)
     if name == "vm_key":
@@ -2541,27 +2620,36 @@ def _collect_calls(buf, native_calls, protocol_blocks):
             slot = native_calls[idx]
             tool = slot["name"].strip()
             nid = slot["id"] or f"call_{uuid.uuid4().hex[:8]}"
-            try:
-                args = json.loads(slot["args"] or "{}")
-            except Exception:
-                args = {}
-            if not isinstance(args, dict):
-                args = {}
+            parsed = _lenient_json(slot["args"])
+            if parsed is None and isinstance(slot["args"], str):
+                # some models send the args as a bare string, not JSON
+                parsed = {"value": slot["args"]}
+            args = parsed if isinstance(parsed, dict) else {}
             calls.append((nid, tool, args))
     elif protocol_blocks:
-        parsed = parse_xml_tool_block(protocol_blocks[0])
-        if parsed:
-            calls.append((None, parsed[0], parsed[1] or {}))
+        for blk in protocol_blocks:
+            parsed = parse_xml_tool_block(blk)
+            if parsed:
+                calls.append((None, parsed[0], parsed[1] or {}))
     if not calls:
         for line in buf.strip().splitlines():
             if TOOL_RE.match(line.strip()):
-                try:
-                    tl = json.loads(line.strip())
-                    calls.append((None, str(tl.get("tool", "")),
-                                  tl.get("args", {}) or {}))
+                tl = _lenient_json(line.strip())
+                if not isinstance(tl, dict):
+                    continue
+                tool = str(tl.get("tool") or tl.get("name") or
+                           (tl.get("function") or {}).get("name") if isinstance(tl.get("function"), dict) else "").strip()
+                raw_args = tl.get("args")
+                if raw_args is None and isinstance(tl.get("function"), dict):
+                    raw_args = tl.get("function").get("arguments")
+                if isinstance(raw_args, str):
+                    parsed = _lenient_json(raw_args)
+                    raw_args = parsed if isinstance(parsed, dict) else {"value": raw_args}
+                if not isinstance(raw_args, dict):
+                    raw_args = {}
+                if tool:
+                    calls.append((None, tool, raw_args))
                     break
-                except Exception:
-                    pass
     return calls
 
 
@@ -2689,7 +2777,7 @@ ROUTE_DEFAULT = ["minimax-m27", "hunyuan-3", "mistral-small-32", "qwen36-27b"]
 # Foundry (agent) routes over FRONTIER models only — verified-live ones first.
 FOUNDRY_POOL = ["nemotron-3-ultra", "nemotron-super-120b", "qwen35-397b",
                 "kiro-auto", "minimax-m3", "gemini-36-flash", "qwen37-flash",
-                "deepseek-v4-flash", "gpt-oss-120b", "llama33-70b", "qwen38-max"]
+                "deepseek-v4-flash", "gpt-oss-120b", "llama33-70b"]
 
 
 def foundry_route(is_admin=False):
@@ -2712,7 +2800,7 @@ def agent_failover_chain(model_id, is_admin=False):
     else:
         chain = ["nemotron-3-ultra", "kiro-auto", "minimax-m3",
                  "gemini-36-flash", "deepseek-v4-flash", "qwen37-flash",
-                 "nemotron-super-120b", "minimax-m27", "hunyuan-3", "qwen38-max"]
+                 "nemotron-super-120b", "minimax-m27", "hunyuan-3"]
     chain = [c for c in chain if c in MODEL_MAP]
     return [model_id] + [c for c in chain if c != model_id]
 
@@ -2768,6 +2856,32 @@ async def _fetch_ovh_image(route, prompt):
     raise RuntimeError("ovh image provider unavailable")
 
 
+async def _fetch_logfare_image(route, prompt):
+    if not LOGFARE_KEY:
+        raise RuntimeError("logfare key not configured")
+    async with httpx.AsyncClient(timeout=180) as c:
+        for att in range(3):
+            try:
+                r = await c.post(LOGFARE_IMG,
+                                 headers={"Authorization": f"Bearer {LOGFARE_KEY}"},
+                                 json={"model": route, "prompt": prompt, "n": 1,
+                                       "size": "1024x1024", "response_format": "b64_json"})
+                if r.status_code == 200:
+                    data = (r.json().get("data") or [{}])[0]
+                    raw = data.get("b64_json")
+                    if raw:
+                        return b64.b64decode(raw)
+                    url = data.get("url")
+                    if url:
+                        img = await c.get(url)
+                        if img.status_code == 200:
+                            return img.content
+            except Exception:
+                pass
+            await asyncio.sleep(1.0 + att * 1.5)
+    raise RuntimeError("logfare image provider unavailable")
+
+
 async def fetch_image(model_id, prompt, w=768, h=768):
     """Generate via a canonical image model's routes, walking them in
     priority order like text models. Cross-model fallback to the next
@@ -2784,6 +2898,8 @@ async def fetch_image(model_id, prompt, w=768, h=768):
                                                          random.randint(1, 10**6), w, h)
                     elif provider == "ovh":
                         return await _fetch_ovh_image(upstream, prompt)
+                    elif provider == "logfare":
+                        return await _fetch_logfare_image(upstream, prompt)
                 except Exception as e:
                     last = e
     raise RuntimeError(f"image providers unavailable: {last}")
@@ -2797,6 +2913,38 @@ async def lifespan(app):
     yield
 
 app = FastAPI(title="The Colosseum", lifespan=lifespan)
+
+
+# Force-stop registry: conversation_id -> running streaming task. Lets a human
+# (or the frontend) hard-cancel a generation server-side, and blocks sending a
+# new message into a conversation while one is still generating.
+_RUNNING = {}
+
+
+def _tracked(cid, agen):
+    """Wrap a chat/agent stream so it registers itself as the conversation's
+    running task and is cancellable via /api/stop/{cid}."""
+    async def _g():
+        _RUNNING[cid] = asyncio.current_task()
+        try:
+            async for ev in agen:
+                yield ev
+        finally:
+            _RUNNING.pop(cid, None)
+    return _g()
+
+
+@app.post("/api/stop/{cid}")
+def api_stop(cid: str, request: Request):
+    """Force-stop a running generation for a conversation."""
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
+    t = _RUNNING.get(cid)
+    if t and not t.done():
+        t.cancel()
+        return {"ok": True, "stopped": True}
+    return {"ok": True, "stopped": False}
 
 # ============================================================ auth
 # Stateless, Vercel-safe accounts: signed cookies only, no server-side
@@ -3147,12 +3295,19 @@ class VoteReq(BaseModel):
     winner: str
 
 
+class Attachment(BaseModel):
+    name: str = ""
+    mime: str = ""
+    data_b64: str = ""
+
+
 class ChatReq(BaseModel):
     prompt: str
     model_id: str = "auto"
     conversation_id: str = ""
     agent: bool = False
     reasoning_effort: str = ""
+    attachments: list[Attachment] = []
 
 
 class SkillReq(BaseModel):
@@ -3301,6 +3456,8 @@ def api_continue(req: ContinueReq, request: Request):
         raise HTTPException(400, "no conversation")
     if _user_owns_conv(cid, u["sub"]) is False:
         raise HTTPException(403, "not your conversation")
+    if cid in _RUNNING and not _RUNNING[cid].done():
+        raise HTTPException(409, "still generating — stop it before continuing")
     maybe_throttle(request)
     conn = db()
     rows = conn.execute(
@@ -3318,8 +3475,8 @@ def api_continue(req: ContinueReq, request: Request):
     prompt += (" Work autonomously — use tools, check results, and don't stop until the "
                "task is complete. Then give a final summary of the outcome.")
     model_id = foundry_route(request_is_admin(request))
-    return StreamingResponse(agent_loop(cid, model_id, prompt, hist_msgs,
-                                        is_admin=request_is_admin(request)),
+    return StreamingResponse(_tracked(cid, agent_loop(cid, model_id, prompt, hist_msgs,
+                                                      is_admin=request_is_admin(request))),
                              media_type="application/x-ndjson")
 
 
@@ -3719,6 +3876,49 @@ def get_conv(cid: str, request: Request):
             "canvas": [dict(f) for f in files]}
 
 
+@app.post("/api/conversations/{cid}/upload")
+async def upload_canvas_files(cid: str, request: Request):
+    """Upload files (or .zip archives) into a conversation's workspace.
+    The agent can list/read them like any other workspace file."""
+    u = require_user(request)
+    if _user_owns_conv(cid, u["sub"]) is False:
+        raise HTTPException(403, "not your conversation")
+    form = await request.form()
+    files = [f for f in form.values()
+             if hasattr(f, "filename") and hasattr(f, "read") and f.filename]
+    if not files:
+        raise HTTPException(400, "no files uploaded")
+    total = 0
+    saved = []
+    for f in files:
+        data = await f.read()
+        total += len(data)
+        if total > 26_000_000:
+            raise HTTPException(413, "uploads are limited to 25MB total")
+        fname = os.path.basename((f.filename or "file").replace("\\", "/")).strip()
+        if not fname or fname in (".", ".."):
+            continue
+        if fname.lower().endswith(".zip"):
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(data))
+                entries = [n for n in zf.namelist()
+                           if not n.endswith("/") and
+                           not any(p in ("..", "") for p in n.split("/"))]
+                if len(entries) > 300:
+                    raise HTTPException(413, "zip contains too many files (max 300)")
+                for n in entries[:300]:
+                    zdata = zf.read(n)[:150000]
+                    _canvas_write(cid, n[:80], zdata.decode("utf-8", "replace"))
+                    saved.append(n[:80])
+            except zipfile.BadZipFile:
+                raise HTTPException(400, f"{fname} is not a valid zip archive")
+        else:
+            _canvas_write(cid, fname[:80],
+                          data.decode("utf-8", "replace")[:150000])
+            saved.append(fname[:80])
+    return {"saved": saved, "files": canvas_file_list(cid)}
+
+
 @app.patch("/api/conversations/{cid}")
 def rename_conv(cid: str, req: RenameReq, request: Request):
     u = require_user(request)
@@ -3773,6 +3973,18 @@ async def chat(req: ChatReq, request: Request):
     elif _user_owns_conv(cid, u["sub"]) is False:
         raise HTTPException(403, "not your conversation")
 
+    # one generation at a time per conversation — force-stop first
+    if cid in _RUNNING and not _RUNNING[cid].done():
+        raise HTTPException(409, "still generating — stop it before sending another message")
+
+    # attachments: [{name, mime, data_b64}] — small text/image payloads
+    attachments = [a for a in (req.attachments or []) if a.data_b64]
+    if len(attachments) > 4:
+        raise HTTPException(413, "max 4 attachments per message")
+    for a in attachments:
+        if len(a.data_b64) > 5_500_000:
+            raise HTTPException(413, "each attachment is limited to 4MB")
+
     model_id = req.model_id
     is_agent = req.agent or req.model_id == "agent"
     is_admin = request_is_admin(request) or admin_unlocked()
@@ -3803,11 +4015,45 @@ async def chat(req: ChatReq, request: Request):
     conn.close()
     hist_msgs = [{"role": h["role"], "content": h["content"][:2000]}
                  for h in reversed(history) if h["role"] in ("user", "assistant")]
+
+    # --- attachments: images -> vision content parts / workspace; text -> prompt
+    text_parts = [req.prompt]
+    user_content = None
+    for a in attachments:
+        try:
+            raw = b64.b64decode(a.data_b64)
+        except Exception:
+            continue
+        if (a.mime or "").startswith("image/"):
+            if is_agent:
+                _canvas_write(cid, re.sub(r"[^\w.\-]", "_", a.name or "image")[:60],
+                              a.data_b64[:300000])
+            elif model_id in VISION_MODELS:
+                if user_content is None:
+                    user_content = [{"type": "text", "text": ""}]
+                user_content.append({"type": "image_url",
+                                     "image_url": {"url": f"data:{a.mime or 'image/png'};base64,{a.data_b64}"}})
+            else:
+                text_parts.append(f"\n[an image was attached: {a.name} — this model can't see images]")
+        else:
+            try:
+                txt = raw.decode("utf-8", "replace")[:12000]
+            except Exception:
+                txt = ""
+            if txt.strip():
+                text_parts.append(f"\n[attached file: {a.name}]\n{txt}")
+    if user_content is not None:
+        user_content[0]["text"] = "\n".join(text_parts)
+    if is_agent and any((a.mime or "").startswith("image/") for a in attachments):
+        text_parts.append("\n[attached image(s) are saved in your workspace as base64 text — read_file "
+                          "returns base64; decode with python (import base64; base64.b64decode(...)) "
+                          "and write the bytes to a file if you need to inspect the image]")
+    prompt_text = "\n".join(text_parts)
     save_msg(cid, "user", req.prompt)
 
     if is_agent:
-        return StreamingResponse(agent_loop(cid, model_id, req.prompt, hist_msgs,
-                                            is_admin=is_admin),
+        return StreamingResponse(_tracked(cid, agent_loop(cid, model_id, prompt_text,
+                                                          hist_msgs, is_admin=is_admin)),
                                  media_type="application/x-ndjson")
 
     async def gen():
@@ -3825,7 +4071,9 @@ async def chat(req: ChatReq, request: Request):
             return
         msgs = ([{"role": "system",
                   "content": "You are a helpful assistant. Answer well and directly." + ANON_SYS}]
-                + hist_msgs + [{"role": "user", "content": req.prompt}])
+                + hist_msgs
+                + [{"role": "user",
+                    "content": user_content if user_content is not None else prompt_text}])
         full = ""
         served_box = [model_id]
         red = LeakRedactor()
@@ -3869,7 +4117,7 @@ async def chat(req: ChatReq, request: Request):
                               "to": MODEL_MAP[served_box[0]]["name"]}) + "\n"
         yield json.dumps({"type": "end"}) + "\n"
 
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    return StreamingResponse(_tracked(cid, gen()), media_type="application/x-ndjson")
 
 
 def clean_final(text):

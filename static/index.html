@@ -129,6 +129,18 @@ try{
     font-family:inherit;resize:none;outline:none;padding:13px 13px 7px;min-height:46px;max-height:200px}
   .composer textarea::placeholder{color:var(--muted2)}
   .composer .row{display:flex;align-items:center;gap:8px;padding:0 9px}
+  .att-chips{display:flex;flex-wrap:wrap;gap:6px;padding:9px 11px 0}
+  .att-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-family:var(--mono);
+    color:var(--text2);background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+    padding:3px 8px;max-width:230px}
+  .att-chip b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+  .att-chip button{background:none;border:none;color:var(--muted2);cursor:pointer;font-size:13px;
+    padding:0 2px;line-height:1}
+  .att-chip button:hover{color:var(--cream)}
+  .attach{flex:none;background:none;border:1px solid var(--border);border-radius:10px;color:var(--text2);
+    width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+    transition:color .13s,border-color .13s}
+  .attach:hover{color:var(--cream);border-color:var(--acc)}
   .chip-btn{display:flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--border);
     color:var(--text2);font-size:12px;font-weight:500;padding:6px 12px;border-radius:9px;cursor:pointer;
     transition:border-color .13s,color .13s,background .13s}
@@ -869,8 +881,10 @@ try{
       <div class="hero-center" id="chatHero">
         <h1 id="heroTitle">What would you like to do?</h1>
         <div class="composer">
+          <div class="att-chips" id="attChipsHero"></div>
           <textarea id="heroInput" rows="1" placeholder="Ask anything…"></textarea>
           <div class="row">
+            <button class="attach" id="attHero" title="Attach file"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
             <button class="send" id="heroSend" title="Send"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg></button>
           </div>
         </div>
@@ -879,8 +893,10 @@ try{
         <div class="msgs" id="msgs"></div>
         <div class="chat-composer-wrap">
           <div class="composer">
+            <div class="att-chips" id="attChipsChat"></div>
             <textarea id="chatInput" rows="1" placeholder="Reply…"></textarea>
             <div class="row">
+              <button class="attach" id="attChat" title="Attach file"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
               <button class="send" id="chatSend" title="Send"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg></button>
             </div>
           </div>
@@ -888,6 +904,7 @@ try{
       </div>
       <div class="msel-pop" id="modelPop"></div>
       <div class="cmdpop" id="cmdPop"></div>
+      <input type="file" id="attFile" multiple style="display:none">
       <div id="vmWatch" style="display:none">
         <div class="vw-head">
           <span class="vw-ttl"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg> workstations</span>
@@ -1403,7 +1420,7 @@ function setFoundryUI(on){
     mb.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 5v10l-8 5-8-5V7z"/><path d="M12 8v8M8 10v4M16 10v4"/></svg> <span id="modeLabel">Foundry</span>';
     mb.style.pointerEvents='none';           // topbar selector dead in Foundry
     $('#modelPop').classList.remove('open'); // and close it if it was open
-    if(vw){vw.style.display='block';vmWatchRefresh();}
+    if(vw){vw.style.display='block';vmWatchRefresh();if(!vmPollTimer)vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();},10000);}
   }else{
     mb.innerHTML='<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg> <span id="modeLabel"></span> <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"/></svg>';
     mb.style.pointerEvents='auto';
@@ -1599,20 +1616,20 @@ function fmtSize(n){
   if(n<1048576)return (n/1024).toFixed(1)+' KB';
   return (n/1048576).toFixed(2)+' MB';
 }
-async function sendChat(fromHero, goal){
+async function sendChat(fromHero, goal, contPrompt, contModel){
   const inp=fromHero?$('#heroInput'):$('#chatInput');
-  const prompt=(goal||inp.value.trim());if(!prompt)return;
+  const prompt=(contPrompt||goal||inp.value.trim());if(!prompt)return;
   const agent=foundryMode;
-  if(!goal)inp.value='';
+  if(!goal&&!contPrompt)inp.value='';
   $('#chatHero').style.display='none';$('#chatBody').style.display='block';showPage('chat');
   const box=$('#msgs');
-  if(!goal){
+  if(!goal&&!contPrompt){
     const u=document.createElement('div');u.className='m-user';u.textContent=prompt;box.appendChild(u);
   }
   const bot=document.createElement('div');bot.className='m-bot';
   bot.innerHTML='<div class="who">…</div><div class="agent-wrap"></div><div class="ws-wrap"></div><div class="status-wrap"><div class="status-line"><div class="spin"></div>Connecting…</div></div><div class="body"></div>';
   box.appendChild(bot);
-  if(goal){
+  if(goal||contPrompt){
     const note=document.createElement('div');
     note.style.cssText='font-size:11px;color:var(--muted2);font-family:var(--mono);margin-bottom:4px;align-self:flex-start';
     note.innerHTML='<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v5h-5"/></svg> continuation'+(goal?' — '+goal:'');
@@ -1715,7 +1732,7 @@ async function sendChat(fromHero, goal){
   function renderWorkspace(){
     if(!workspace.length){wsWrap.innerHTML='';return;}
     const head='<div class="ws-head"><span>'+ico('archive',15)+' Workspace</span><span class="ws-n">'+workspace.length+' file'+(workspace.length>1?'s':'')+'</span>'+
-      '<button class="ws-zip" data-a="zip">Download .zip</button></div>';
+      '<button class="ws-zip" data-a="up">Upload</button><button class="ws-zip" data-a="zip">Download .zip</button></div>';
     wsWrap.innerHTML='<div class="ws-card">'+head+'<div class="ws-files">'+
       workspace.map(f=>'<div class="ws-file"><span class="fi">'+FILE_ICON(f.name)+'</span>'+
         '<span class="fn" title="'+esc(f.name)+'">'+esc(f.name)+'</span>'+
@@ -1723,7 +1740,19 @@ async function sendChat(fromHero, goal){
         '<a class="wbtn" data-dl="'+esc(f.name)+'" href="/p/'+curConv+'/'+encodeURIComponent(f.name)+'?dl=1">'+ico('download',13)+'</a>'+
         '<button class="wbtn" data-open="'+esc(f.name)+'">preview</button></div>').join('')+
       '</div></div>';
-    wsWrap.querySelector('.ws-zip').onclick=()=>{window.location.href='/api/canvas/'+curConv+'/zip';};
+    wsWrap.querySelector('[data-a=zip]').onclick=()=>{window.location.href='/api/canvas/'+curConv+'/zip';};
+    wsWrap.querySelector('[data-a=up]').onclick=()=>{
+      const fi=document.createElement('input');fi.type='file';fi.multiple=true;
+      fi.accept='.zip,.txt,.md,.json,.csv,.xml,.yml,.yaml,.js,.mjs,.cjs,.ts,.jsx,.tsx,.html,.css,.py,.sql,.sh,.png,.jpg,.jpeg,.gif,.svg,.webp';
+      fi.onchange=async()=>{
+        if(!fi.files.length)return;
+        const fd=new FormData();for(const f of fi.files)fd.append('files',f);
+        const r=await apiFetch('/api/conversations/'+curConv+'/upload',{method:'POST',body:fd}).catch(()=>null);
+        if(r&&r.ok){const j=await r.json();if(j.files)workspace=j.files;renderWorkspace();toast('Uploaded '+(j.saved||[]).length+' file(s)');}
+        else toast('Upload failed.');
+      };
+      fi.click();
+    };
     wsWrap.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{openPreview(curConv,b.dataset.open);});
   }
   function renderError(msg,withRetry){
@@ -1744,7 +1773,7 @@ async function sendChat(fromHero, goal){
     const reasoning_effort=(agent||!effortSel||effortSel.disabled)?'':effortSel.value||'';
     const body=goal
       ?JSON.stringify({conversation_id:curConv,goal})
-      :JSON.stringify({prompt,model_id:foundryMode?'agent':curModel,conversation_id:curConv,agent,reasoning_effort});
+      :JSON.stringify({prompt,model_id:contPrompt?(contModel||'auto'):(foundryMode?'agent':curModel),conversation_id:curConv,agent,reasoning_effort,...(ATT.length?{attachments:ATT}:{})});
     const resp=await apiFetch(goal?'/api/continue':'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
       body,signal:abortCtl.signal});
     if(!resp.ok){
@@ -1768,9 +1797,11 @@ async function sendChat(fromHero, goal){
           thinking+=(thinking?'\n':'')+ev.text;
           scheduleRender();break;
         case 'tool_call':upsertStep({id:ev.id,tool:ev.tool,label:ev.label,st:'running'});renderSteps();
+          if(ev.tool&&ev.tool.indexOf('vm_')===0)vmWatchRefresh();
           renderStatus(ev.label);break;
         case 'tool_result':upsertStep({id:ev.id,st:ev.status==='error'?'fail':'done',
-          dur:ev.duration_ms,detail:ev.summary||''});renderSteps();break;
+          dur:ev.duration_ms,detail:ev.summary||''});renderSteps();
+          if(ev.tool&&ev.tool.indexOf('vm_')===0)vmWatchRefresh();break;
         case 'image':images.push({url:ev.url});scheduleRender();break;
         case 'skill':renderStatus('Loaded skill: '+ev.name);break;
         case 'ask_user':showAskCard(ev.question);break;
@@ -1803,24 +1834,68 @@ async function sendChat(fromHero, goal){
   if(!finished&&!errored&&!aborted)finish(text);
   sendBtns.forEach(b=>{b.classList.remove('stop');b.innerHTML='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg>';});
   abortCtl=null;
+  if(!goal&&!contPrompt&&ATT.length){ATT=[];renderAttChips();}
 }
 function addActs(bot,text,prompt){
   const acts=document.createElement('div');acts.className='m-acts';
   const hasCode=!!bot.querySelector('.codeblock');
-  acts.innerHTML='<button data-a="copy">copy</button>'+(hasCode?'<button data-a="canvas">canvas</button>':'')+'<button data-a="retry">regenerate</button>';
+  acts.innerHTML='<button data-a="copy">copy</button>'+(hasCode?'<button data-a="canvas">canvas</button>':'')+'<button data-a="cont">continue</button><button data-a="retry">regenerate</button>';
   acts.querySelector('[data-a=copy]').onclick=()=>{navigator.clipboard.writeText(text);toast('Copied');};
   if(hasCode)acts.querySelector('[data-a=canvas]').onclick=()=>{
     const cb=bot.querySelector('.codeblock');if(!cb)return;
     runCanvas(cb.querySelector('pre code').textContent,cb.querySelector('.cb-lang').textContent);
   };
+  acts.querySelector('[data-a=cont]').onclick=()=>{
+    if(foundryMode&&curConv){sendChat(false,'continue the current task');return;}
+    const mid=(MODELS.find(x=>x.name===who)||{}).id||curModel;
+    sendChat(false,null,'Continue your previous response exactly from where it stopped — seamless continuation, no repetition, no preamble.',mid);
+  };
   acts.querySelector('[data-a=retry]').onclick=()=>{$('#chatInput').value=prompt;sendChat(false);};
   bot.appendChild(acts);
 }
 function sendOrStop(fromHero){
-  if(abortCtl){abortCtl.abort();return;}
+  if(abortCtl){
+    abortCtl.abort();
+    if(curConv)fetch('/api/stop/'+curConv,{method:'POST'}).catch(()=>{});
+    return;
+  }
   if(interceptSlash(fromHero?$('#heroInput'):$('#chatInput')))return;
   sendChat(fromHero);
 }
+window.addEventListener('pagehide',()=>{if(curConv&&abortCtl){try{navigator.sendBeacon('/api/stop/'+curConv);}catch(e){}}});
+// ---- attachments (shared by hero + chat composers) ------------------------
+let ATT=[];
+function renderAttChips(){
+  ['attChipsHero','attChipsChat'].forEach(id=>{
+    const el=$('#'+id);el.innerHTML='';
+    el.style.display=ATT.length?'flex':'none';
+    ATT.forEach((a,i)=>{
+      const c=document.createElement('div');c.className='att-chip';
+      c.innerHTML='<b>'+esc(a.name)+'</b><button title="remove">×</button>';
+      c.querySelector('button').onclick=()=>{ATT.splice(i,1);renderAttChips();};
+      el.appendChild(c);
+    });
+  });
+}
+function pickFiles(){
+  if(abortCtl){toast('Stop the current reply first.');return;}
+  const fi=$('#attFile');
+  const got=[...(fi.files||[])].slice(0,Math.max(0,4-ATT.length));
+  fi.value='';
+  Promise.all(got.map(f=>new Promise((res,rej)=>{
+    const r=new FileReader();r.onload=()=>res({name:f.name,mime:f.type||'',data:r.result});r.onerror=rej;r.readAsDataURL(f);
+  }))).then(arr=>{
+    for(const x of arr){
+      const data_b64=(x.data.split(',')[1]||'');
+      if(data_b64.length>5592404){toast('File too large (max 4MB): '+x.name);continue;}
+      ATT.push({name:x.name,mime:x.mime,data_b64});
+    }
+    renderAttChips();
+  }).catch(()=>toast('Could not read file.'));
+}
+$('#attHero').onclick=()=>$('#attFile').click();
+$('#attChat').onclick=()=>$('#attFile').click();
+$('#attFile').onchange=pickFiles;
 $('#heroSend').onclick=()=>sendOrStop(true);
 $('#chatSend').onclick=()=>sendOrStop(false);
 $('#heroInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendOrStop(true);}});
@@ -2255,7 +2330,7 @@ function pickModel(q){
 }
 function runGoal(goal){
   if(!curConv){toast('Start a conversation first, then /goal keeps the agent going.');return;}
-  sendChat(false,null,goal);
+  sendChat(false,goal);
 }
 function cmdKey(e,inp){
   if(e.key==='ArrowDown'){cmdSelIdx=Math.min(cmdSelIdx+1,CMD_LIST.length-1);showCmdPop(inp);e.preventDefault();return;}
@@ -2307,9 +2382,7 @@ async function vmWatchRefresh(){
       c.onclick=()=>{vmSel=c.dataset.id;vmWatchRefresh();vmScreen(vmSel);};
     });
     if(vmSel&&!VMSESS.some(s=>s.id===vmSel)){vmSel=null;$('#vmScreenTitle').textContent='screen';$('#vmScreen').innerHTML='<span class="vm-empty">click a session to watch its screen</span>';}
-    if(vmSel&&VMSESS.find(s=>s.id===vmSel)?.status==='running'&&!vmPollTimer){
-      vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();},15000);
-    }
+    if(vmSel&&VMSESS.find(s=>s.id===vmSel)?.status==='running'&&!vmPollTimer){vmPollTimer=setInterval(()=>{if(!foundryMode){clearInterval(vmPollTimer);vmPollTimer=null;return;}vmWatchRefresh();},10000);}
   }catch(e){/* toast already shown */}
 }
 // ---- live RFB viewer (fluid video of the VM desktop) ---------------------

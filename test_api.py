@@ -272,6 +272,78 @@ def test_vm_stream_gate():
         pass
 
 
+def test_stop_endpoint():
+    c = _login()
+    r = c.post("/api/conversations", json={"title": "stop test"})
+    cid = r.json()["id"]
+    # no generation running -> 200, stopped False (idempotent)
+    s1 = c.post(f"/api/stop/{cid}")
+    assert s1.status_code == 200 and s1.json()["stopped"] is False
+    s2 = c.post(f"/api/stop/{cid}")
+    assert s2.status_code == 200 and s2.json()["stopped"] is False
+    # nonexistent conversation: idempotent no-op (consistent with delete/rename)
+    s3 = c.post(f"/api/stop/nope")
+    assert s3.status_code == 200 and s3.json()["stopped"] is False
+    # anonymous is rejected
+    c.post("/api/auth/logout")
+    assert c.post(f"/api/stop/{cid}").status_code == 401
+
+
+def test_upload_files():
+    import io as _io
+    c = _login()
+    r = c.post("/api/conversations", json={"title": "upload test"})
+    cid = r.json()["id"]
+
+    # plain text file
+    up = c.post(f"/api/conversations/{cid}/upload",
+                files={"files": ("hello.txt", b"hello world", "text/plain")})
+    assert up.status_code == 200
+    d = up.json()
+    assert d["saved"] == ["hello.txt"]
+    assert any(f["name"] == "hello.txt" for f in d["files"])
+    got = c.get(f"/p/{cid}/hello.txt")
+    assert got.status_code == 200 and got.text == "hello world"
+
+    # zip archive extracts into the workspace
+    zbuf = _io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("lib/a.js", "let a=1;")
+        z.writestr("notes.md", "# hi")
+        z.writestr("../evil.txt", "nope")  # path traversal — must be dropped
+    up2 = c.post(f"/api/conversations/{cid}/upload",
+                 files={"files": ("bundle.zip", zbuf.getvalue(), "application/zip")})
+    assert up2.status_code == 200
+    names = {f["name"] for f in up2.json()["files"]}
+    assert "lib/a.js" in names and "notes.md" in names
+    assert "evil.txt" not in names and "../evil.txt" not in names
+
+    # not-a-zip is rejected
+    bad = c.post(f"/api/conversations/{cid}/upload",
+                 files={"files": ("fake.zip", b"not a zip", "application/zip")})
+    assert bad.status_code == 400
+
+    # anonymous rejected
+    c.post("/api/auth/logout")
+    assert c.post(f"/api/conversations/{cid}/upload",
+                  files={"files": ("x.txt", b"x", "text/plain")}).status_code == 401
+
+
+def test_chat_attachment_validation():
+    c = _login(admin=True)  # admin cookie lifts the frontier gate
+    b = {"prompt": "hi", "model_id": "qwen35-397b", "conversation_id": "",
+         "attachments": [{"name": f"f{i}.txt", "mime": "text/plain",
+                          "data_b64": "aGk="} for i in range(5)]}
+    assert c.post("/api/chat", json=b).status_code == 413  # max 4
+    b["attachments"] = [{"name": "big.bin", "mime": "application/octet-stream",
+                         "data_b64": "A" * 5_600_000}]
+    assert c.post("/api/chat", json=b).status_code == 413  # 4MB cap
+    b["attachments"] = [{"name": "ok.txt", "mime": "text/plain", "data_b64": "aGVsbG8="}]
+    r = c.post("/api/chat", json=b)
+    assert r.status_code == 200  # valid attachment streams; not consumed here
+    r.close()
+
+
 def _run_all():
     import re
     tests = [(n, f) for n, f in sorted(globals().items())
