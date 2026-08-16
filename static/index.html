@@ -714,11 +714,14 @@ try{
   .cap-card input,.auth-card input{border:1px solid var(--border);background:var(--bg);
     color:var(--text);border-radius:9px;padding:10px 13px;font-size:13.5px;font-family:inherit}
   .auth-err{color:var(--red);font-size:12px;text-align:center;min-height:16px}
-  .dev-login{display:none;gap:8px;width:100%;margin-top:6px}
-  .dev-login input{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--border2);border-radius:9px;color:var(--text);
-    padding:9px 12px;font-size:13.5px;outline:none;font-family:ui-monospace,Consolas,monospace}
-  .dev-login input:focus{border-color:var(--acc)}
-  .dev-login .btn{padding:9px 16px;border-radius:9px;flex:none}
+  .auth-tabs{display:flex;gap:4px;background:var(--panel2);padding:3px;border-radius:10px;margin:4px 0 10px;width:100%}
+  .auth-tabs .atab{flex:1;background:none;border:none;color:var(--muted);font-size:12.5px;padding:7px 0;border-radius:8px;cursor:pointer}
+  .auth-tabs .atab.on{background:var(--acc-dim);color:var(--acc2)}
+  .manual-form{display:flex;flex-direction:column;gap:8px;width:100%;margin-bottom:10px}
+  .manual-form input{background:var(--panel2);border:1px solid var(--border2);border-radius:9px;color:var(--text);
+    padding:10px 12px;font-size:13.5px;outline:none;font-family:ui-monospace,Consolas,monospace}
+  .manual-form input:focus{border-color:var(--acc)}
+  .manual-form .btn{padding:10px;border-radius:9px}
   .auth-legal{margin-top:4px;text-align:center;font-size:11px;color:var(--muted2);line-height:1.5}
   .auth-legal a{color:var(--acc2)}
   .cap-q{font-family:var(--mono);font-size:17px;text-align:center;padding:14px;border:1px dashed color-mix(in srgb, var(--acc) 35%, transparent);
@@ -1126,15 +1129,20 @@ try{
   <div class="auth-card">
     <div class="auth-brand"><span class="mark"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l7 7"/><path d="M4 4h6l10 10"/><path d="M11 11l9 9"/><path d="M20 4l-7 7"/></svg></span></div>
     <h2>Sign in to the Colosseum</h2>
-    <p class="auth-sub">Logins and chats are saved to your account. Sign in with Google to keep building.</p>
+    <p class="auth-sub">Logins and chats are saved to your account. Sign in with Google or a username to keep building.</p>
+    <div class="auth-tabs">
+      <button class="atab" id="atabLogin" data-mode="login">Log in</button>
+      <button class="atab" id="atabSignup" data-mode="signup">Sign up</button>
+    </div>
+    <div class="manual-form" id="manualForm">
+      <input type="text" id="authUser" placeholder="username" autocomplete="username" spellcheck="false" autocapitalize="off">
+      <input type="password" id="authPass" placeholder="password" autocomplete="current-password" spellcheck="false">
+      <button class="btn" id="authGo">Log in</button>
+    </div>
     <a class="gbtn" id="authGoogleBtn" href="/api/auth/google/start" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.1a6.6 6.6 0 0 1 0-4.2V7.06H2.18a11 11 0 0 0 0 9.88l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
       Sign in with Google
     </a>
-    <div class="dev-login" id="devLogin" style="display:none">
-      <input type="password" id="devPass" placeholder="owner password" autocomplete="current-password" spellcheck="false">
-      <button class="btn" id="devGo">Sign in</button>
-    </div>
     <div class="auth-err" id="authErr"></div>
     <div class="auth-legal">By signing in you agree to the <a href="/terms">terms</a> and <a href="/privacy">privacy policy</a>. Powered free by NoVM, FreeRouter and other third-party providers.</div>
   </div>
@@ -1251,35 +1259,45 @@ function showCaptcha(cap){
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();go();}};
   });
 }
-let AUTH_GOOGLE=false;
+let AUTH_GOOGLE=false,WALL_MODE='login';
+function setWallMode(m){
+  WALL_MODE=m;
+  $('#atabLogin').classList.toggle('on',m==='login');
+  $('#atabSignup').classList.toggle('on',m==='signup');
+  $('#authGo').textContent=m==='login'?'Log in':'Create account';
+  $('#authPass').autocomplete=m==='login'?'current-password':'new-password';
+  $('#authErr').textContent='';
+}
 function showAuthWall(){
   ME=null;
   const gb=$('#authGoogleBtn');
   if(!AUTH_GOOGLE){
     gb.style.display='none';
-    $('#devLogin').style.display='flex';
-    $('#authErr').textContent='Google sign-in is not configured on this server yet — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET. Sign in with the owner password for now.';
+    $('#authErr').textContent='Google sign-in is not configured on this server yet — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.';
   }else{
     gb.style.display='inline-flex';
-    $('#devLogin').style.display='none';
     $('#authErr').textContent='';
   }
+  setWallMode(WALL_MODE);
   $('#authWall').classList.add('show');
 }
-async function devLoginGo(){
-  const p=$('#devPass').value;
-  if(!p)return;
-  const btn=$('#devGo');btn.disabled=true;
-  const r=await fetch('/api/auth/dev',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({password:p})}).catch(()=>null);
+async function manualAuthGo(){
+  const u=$('#authUser').value.trim(),p=$('#authPass').value;
+  const btn=$('#authGo');btn.disabled=true;
+  const r=await fetch('/api/auth/'+WALL_MODE,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username:u,password:p})}).catch(()=>null);
   btn.disabled=false;
   if(r&&r.ok){location.reload();return;}
-  $('#authErr').textContent=(r&&r.status===403)?'Wrong password.':
-    (r&&r.status===501)?'No admin password is set on this server.':'Sign-in failed — try again.';
-  $('#devPass').select();
+  let msg='Sign-in failed — try again.';
+  if(r){const d=await r.json().catch(()=>({}));if(d.detail)msg=typeof d.detail==='string'?d.detail:JSON.stringify(d.detail);}
+  $('#authErr').textContent=msg;
+  $('#authPass').select();
 }
-$('#devGo').onclick=devLoginGo;
-$('#devPass').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();devLoginGo();}};
+$('#authGo').onclick=manualAuthGo;
+$('#authUser').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();manualAuthGo();}};
+$('#authPass').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();manualAuthGo();}};
+$('#atabLogin').onclick=()=>setWallMode('login');
+$('#atabSignup').onclick=()=>setWallMode('signup');
 async function checkAuth(){
   try{
     const r=await fetch('/api/auth/me');

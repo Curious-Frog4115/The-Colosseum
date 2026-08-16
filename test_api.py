@@ -170,13 +170,31 @@ def test_auth_gates_and_login():
     assert c.get("/api/auth/me").json()["user"] is None
 
 
-def test_dev_login():
+def test_manual_auth_signup_login():
     c = _client()
-    assert c.post("/api/auth/dev", json={"password": "nope"}).status_code == 403
-    ok = c.post("/api/auth/dev", json={"password": "ai4freeadmin"})
-    assert ok.status_code == 200 and ok.json()["user"]["admin"] is True
+    assert c.post("/api/auth/signup", json={"username": "tiny", "password": "x"}).status_code == 400
+    assert c.post("/api/auth/signup", json={"username": "bad name!", "password": "secret123"}).status_code == 400
+    ok = c.post("/api/auth/signup", json={"username": "alice", "password": "secret123"})
+    assert ok.status_code == 200 and ok.json()["user"]["sub"] == "u:alice"
+    dup = c.post("/api/auth/signup", json={"username": "alice", "password": "secret123"})
+    assert dup.status_code == 409
+    assert c.post("/api/auth/login", json={"username": "alice", "password": "nope"}).status_code == 403
+    assert c.post("/api/auth/login", json={"username": "ghost", "password": "secret123"}).status_code == 403
     me = c.get("/api/auth/me").json()
-    assert me["user"]["sub"] == "dev" and me["user"]["admin"] is True
+    assert me["user"]["sub"] == "u:alice" and me["user"]["admin"] is False
+    assert c.get("/api/conversations").status_code == 200
+    assert c.post("/api/auth/logout").status_code == 200
+    assert c.get("/api/auth/me").json()["user"] is None
+
+
+def test_localhost_is_admin():
+    from starlette.requests import Request
+    req = Request({"type": "http", "method": "GET", "path": "/", "query_string": b"",
+                   "headers": [], "client": ("127.0.0.1", 5555)})
+    assert main.request_is_admin(req) is True
+    req2 = Request({"type": "http", "method": "GET", "path": "/", "query_string": b"",
+                    "headers": [], "client": ("203.0.113.9", 5555)})
+    assert main.request_is_admin(req2) is False
 
 
 def test_direct_chat_gate():

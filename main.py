@@ -12,6 +12,7 @@ tracked internally, never shown in blind battles.
 """
 import asyncio
 import base64 as b64
+import datetime
 import hashlib
 import hmac
 import json
@@ -520,6 +521,8 @@ def init_db():
         ts REAL, provider TEXT, model TEXT, ok INTEGER, ms REAL);
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY, pw_hash TEXT NOT NULL, created TEXT NOT NULL);
     """)
     for mid in ALL_RATED:
         conn.execute("INSERT OR IGNORE INTO ratings (model_id) VALUES (?)", (mid,))
@@ -2879,7 +2882,11 @@ def require_user(request):
 
 
 def request_is_admin(request):
-    """Cookie-based admin check — works on Vercel (no shared filesystem)."""
+    """Cookie-based admin check — works on Vercel (no shared filesystem).
+    Localhost is always admin so the self-host runs fully unlocked without
+    needing the password unlock."""
+    if _is_local(_client_ip(request)):
+        return True
     if _verify(request.cookies.get("arena_admin")):
         return True
     u = user_from_request(request)
@@ -2983,20 +2990,60 @@ def auth_logout():
 
 
 class DevLoginReq(BaseModel):
+    username: str = ""
     password: str = ""
 
 
-@app.post("/api/auth/dev")
-def auth_dev(req: DevLoginReq):
-    """Dev-mode password sign-in: only reachable while Google OAuth is NOT
-    configured. Keeps the self-host usable without Google credentials."""
-    if GOOGLE_CLIENT_ID:
-        raise HTTPException(400, "google sign-in is configured — use it")
-    if not ADMIN_PASSWORD:
-        raise HTTPException(501, "no admin password set — set ADMIN_PASSWORD or GOOGLE_CLIENT_ID")
-    if not hmac.compare_digest(req.password or "", ADMIN_PASSWORD):
-        raise HTTPException(403, "wrong password")
-    return _make_auth_response({"sub": "dev", "email": "", "name": "owner", "admin": True})
+def _is_local(ip):
+    return ip in ("127.0.0.1", "::1", "localhost") or (ip or "").startswith("127.")
+
+
+def _hash_pw(pw):
+    salt = secrets.token_hex(8)
+    d = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 120_000)
+    return f"{salt}${d.hex()}"
+
+
+def _check_pw(pw, stored):
+    try:
+        salt, hx = (stored or "").split("$", 1)
+        d = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 120_000)
+        return hmac.compare_digest(d.hex(), hx)
+    except Exception:
+        return False
+
+
+@app.post("/api/auth/signup")
+def auth_signup(req: DevLoginReq):
+    """Manual account signup: username + password, saved in the local DB."""
+    u = (req.username or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_-]{3,24}", u):
+        raise HTTPException(400, "username must be 3-24 chars: letters, digits, _ or -")
+    if len(req.password or "") < 6:
+        raise HTTPException(400, "password must be at least 6 characters")
+    conn = db()
+    try:
+        conn.execute("INSERT INTO users (username, pw_hash, created) VALUES (?,?,?)",
+                     (u, _hash_pw(req.password), datetime.datetime.now(datetime.timezone.utc).isoformat()))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(409, "username already taken")
+    conn.close()
+    return _make_auth_response({"sub": "u:" + u, "email": "", "name": u, "admin": False})
+
+
+@app.post("/api/auth/login")
+def auth_login(req: DevLoginReq):
+    """Manual account login: username + password."""
+    u = (req.username or "").strip().lower()
+    conn = db()
+    row = conn.execute("SELECT pw_hash FROM users WHERE username=?",
+                       (u,)).fetchone()
+    conn.close()
+    if not row or not _check_pw(req.password or "", row["pw_hash"]):
+        raise HTTPException(403, "wrong username or password")
+    return _make_auth_response({"sub": "u:" + u, "email": "", "name": u, "admin": False})
 
 
 @app.get("/api/auth/me")
