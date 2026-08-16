@@ -889,11 +889,11 @@
       <div class="set-card">
         <h3><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg> Admin</h3>
         <p>Enter the admin password to unlock <b>every model everywhere</b>: Direct chat opens up frontier / reasoning / vision / premium models, the model picker shows the full catalog, and Foundry routes over the entire model list. No more battle-only walls.</p>
-        <div class="set-row">
+        <form class="set-row" id="adminForm" onsubmit="return false">
           <input type="password" id="adminPass" placeholder="admin password" autocomplete="off">
           <button class="btn" id="adminUnlockBtn" style="padding:8px 16px;font-size:12.5px">Unlock all models</button>
           <button class="btn ghost" id="adminLockBtn" style="padding:8px 16px;font-size:12.5px">Lock</button>
-        </div>
+        </form>
         <div class="set-state" id="adminState"></div>
       </div>
 
